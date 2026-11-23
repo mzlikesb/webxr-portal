@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>MR Wall Portal</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #111;
+        color: #eee;
+        font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        overflow: hidden;
+      }
+      /* three.js가 추가하는 canvas를 화면 전체로. AR 세션 중엔 헤드셋이
+         canvas를 직접 합성하므로 이 CSS는 세션 밖 2D 화면에만 영향을 준다. */
+      /* three.js는 canvas를 body 끝에 append한다. 그래서 DOM 순서상 #ui보다
+         뒤에 와서, 둘 다 position:fixed인 순간 canvas가 UI를 덮어버린다.
+         canvas는 투명하므로 버튼이 보이긴 하는데 클릭이 canvas로 먹힌다.
+         z-index로 순서를 명시해서 막는다. */
+      canvas { position: fixed; inset: 0; display: block; z-index: 0; }
+
+      #ui {
+        position: fixed;
+        z-index: 1;
+        inset: 0 0 auto 0;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+        pointer-events: none; /* 패널 자체는 클릭을 먹지 않게 */
+      }
+      #enter {
+        pointer-events: auto;
+        padding: 14px 28px;
+        font: inherit;
+        font-size: 18px;
+        border: 1px solid #555;
+        border-radius: 8px;
+        background: #222;
+        color: #eee;
+        cursor: pointer;
+      }
+      #enter:disabled { opacity: 0.4; cursor: default; }
+      #status { margin: 0; white-space: pre-wrap; max-width: 90vw; }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <button id="enter" disabled>확인 중…</button>
+      <pre id="status"></pre>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

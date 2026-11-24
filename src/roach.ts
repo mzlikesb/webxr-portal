@@ -34,6 +34,9 @@ const STEP_HEIGHT = 0.1;
 /** 가장 빠를 때의 속도(m/s). 걸음새 세기를 이 값으로 정규화한다. */
 const MAX_SPEED = 0.26;
 
+/** 몸 중심에서 발까지의 대략적인 거리(m). 회전을 걸음으로 환산할 때 쓴다. */
+const FOOT_RADIUS = 0.03;
+
 /** 원점에서 이만큼 멀어지면 돌아오도록 방향을 튼다(m). */
 const WANDER_RADIUS = 0.08;
 
@@ -211,7 +214,7 @@ function buildAntenna(material: THREE.Material, side: number): Antenna {
   return { segments, side };
 }
 
-function buildBody(material: THREE.Material): THREE.Group {
+function buildBody(material: THREE.Material, wingMaterial: THREE.Material): THREE.Group {
   const body = new THREE.Group();
 
   // 바퀴벌레는 아주 납작하다. 그리고 몸 아랫면이 바닥(y=0)을 파고들면 안 된다.
@@ -236,14 +239,29 @@ function buildBody(material: THREE.Material): THREE.Group {
   head.position.set(0, 0.09, 0.44);
   body.add(head);
 
+  // 딱지날개 한 쌍. 등을 덮는 얇은 판 두 장이 가운데서 겹친다.
+  // 위에서 본 바퀴벌레의 인상은 앞가슴판 방패와 이 가운데 이음선, 둘이 거의
+  // 전부다. 바깥쪽을 살짝 떨구면 등이 둥글게 말린 느낌이 난다.
+  for (const side of [1, -1]) {
+    const wing = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), wingMaterial);
+    wing.scale.set(0.567, 0.05, 1.17); // 반폭 0.17, 두께 0.015, 반길이 0.35
+    wing.position.set(side * 0.055, 0.175, -0.13); // 가운데서 겹치도록 안쪽으로
+    wing.rotation.z = -side * 0.12; // 바깥 가장자리를 아래로
+    body.add(wing);
+  }
+
   return body;
 }
 
 // ---------------------------------------------------------------------------
 
 export function makeRoach(): Roach {
-  const shell = new THREE.MeshStandardMaterial({ color: 0x3a2416, roughness: 0.45 });
-  const limb = new THREE.MeshStandardMaterial({ color: 0x241509, roughness: 0.7 });
+  // 바퀴벌레는 반드르르하다. 거친 재질로 두면 플라스틱 장난감처럼 보인다.
+  // roughness를 낮춰 directional light의 하이라이트가 또렷하게 맺히게 한다 —
+  // 멀리서도 '젖은 듯한 광택'이 먼저 읽힌다.
+  const shell = new THREE.MeshStandardMaterial({ color: 0x3a2416, roughness: 0.3 });
+  const wingShell = new THREE.MeshStandardMaterial({ color: 0x2b190d, roughness: 0.22 });
+  const limb = new THREE.MeshStandardMaterial({ color: 0x241509, roughness: 0.6 });
 
   // root는 미터 단위로 돌아다니고, model이 바퀴 단위를 미터로 줄인다.
   // 둘을 나눠 두면 '땅 위의 위치'와 '몸의 모양'이 섞이지 않는다.
@@ -254,7 +272,7 @@ export function makeRoach(): Roach {
 
   // 몸통만 따로 쥐고 있는다. 걸을 때 이 그룹만 흔들 것이다 — 고관절까지 같이
   // 흔들면 발 자국을 몸 공간으로 되돌리는 계산이 어긋난다.
-  const body = buildBody(shell);
+  const body = buildBody(shell, wingShell);
   model.add(body);
 
   const antennae = [buildAntenna(limb, 1), buildAntenna(limb, -1)];
@@ -335,6 +353,8 @@ export function makeRoach(): Roach {
   /** 돌아다니기가 정한 가고 싶은 속도. speed가 이걸 쫓아간다. */
   let targetSpeed = 0;
   let turnRate = 0;
+  /** 이번 프레임의 회전 각속도(rad/s). 제자리 회전도 걸음을 유발해야 한다. */
+  let turnSpeed = 0;
   let timer = 0;
   let phase = Math.random() * Math.PI * 2;
   let antT = Math.random() * Math.PI * 2;
@@ -372,6 +392,7 @@ export function makeRoach(): Roach {
     if (timer <= 0) {
       if (targetSpeed > 0) {
         targetSpeed = 0; // 멈춤
+        turnRate = 0; // 몸만 계속 도는 일이 없게. 멈추면 완전히 멈춘다.
         timer = rand(0.4, 1.8);
       } else if (Math.random() < 0.18) {
         targetSpeed = rand(0.18, MAX_SPEED); // 가끔 확 달린다
@@ -391,6 +412,7 @@ export function makeRoach(): Roach {
     speed += (targetSpeed - speed) * Math.min(1, dt * 14);
     if (Math.abs(speed - targetSpeed) < 0.002) speed = targetSpeed;
 
+    const headingBefore = heading;
     heading += turnRate * dt;
 
     // 너무 멀어지면 원점 쪽으로 튼다. 미리보기에서 화면 밖으로 나가지 않게.
@@ -399,6 +421,10 @@ export function makeRoach(): Roach {
       const home = Math.atan2(-root.position.x, -root.position.z);
       heading += wrapAngle(home - heading) * Math.min(1, dt * 2);
     }
+
+    // 이번 프레임에 '실제로' 돈 각. turnRate만 보면 안 되는 게, 위의 복귀
+    // 조향처럼 heading을 직접 건드리는 곳이 따로 있기 때문이다.
+    turnSpeed = Math.abs(wrapAngle(heading - headingBefore)) / dt;
 
     root.position.x += Math.sin(heading) * speed * dt;
     root.position.z += Math.cos(heading) * speed * dt;
@@ -410,7 +436,11 @@ export function makeRoach(): Roach {
 
     wander(dt);
 
-    const speedNorm = clamp((speed * speedScale) / MAX_SPEED, 0, 1);
+    // 제자리에서 돌기만 해도 발은 옮겨 디뎌야 한다. 몸 중심에서 발까지가
+    // 대략 FOOT_RADIUS이므로, 각속도에 그걸 곱하면 발이 도는 속도가 나온다.
+    // 이걸 빼먹으면 회전할 때 다리가 얼어붙은 채 몸만 돌아간다.
+    const gaitSpeed = speed + turnSpeed * FOOT_RADIUS;
+    const speedNorm = clamp((gaitSpeed * speedScale) / MAX_SPEED, 0, 1);
 
     // ── 걸음의 박자 ──
     //

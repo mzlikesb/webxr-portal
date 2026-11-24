@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { makeRoach } from './roach';
 
 // ---------------------------------------------------------------------------
 // 1) 화면 밖으로 상태를 내보내는 두 경로
@@ -575,14 +576,45 @@ function updatePortalFade(): void {
 }
 
 // ---------------------------------------------------------------------------
-// 7) 렌더 루프
+// 7) 바퀴벌레 (작업 중)
+//
+//    지금은 걸음새만 맞추는 단계라 2D 미리보기 카메라 앞에 임시로 세워 둔다.
+//    포털 안에 둘지 진짜 방 바닥에 둘지는 아직 안 정했다.
+// ---------------------------------------------------------------------------
+// ④에서 씬 조명을 포털 안으로 옮겼다. 포털 바깥에 조명을 받는 물체가
+// 바퀴벌레 하나 생겼으므로 다시 들인다. AR에서는 실제 방의 조명 정보가
+// 오지 않으므로(Quest 브라우저에 light estimation이 없다) 방 조명을 가정한다.
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404050, 1.6));
+const roachSun = new THREE.DirectionalLight(0xffffff, 2);
+roachSun.position.set(0.5, 1, 0.4);
+scene.add(roachSun);
+
+const roach = makeRoach();
+roach.root.position.set(0, 1.26, -0.13); // 임시 — 미리보기 카메라 코앞(13cm)
+scene.add(roach.root);
+
+/** 걸음새를 눈으로 맞추려고 둔 임시 슬라이더. 0이면 제자리, 1이면 전력 질주. */
+const speedSlider = document.querySelector('#speed') as HTMLInputElement | null;
+
+// ---------------------------------------------------------------------------
+// 8) 렌더 루프
 //    requestAnimationFrame이 아니라 renderer.setAnimationLoop을 쓴다.
 //    XR 세션 중에는 프레임 타이밍의 주인이 브라우저 창이 아니라 XRSession이고,
 //    three.js가 세션 유무에 따라 둘을 알아서 갈아끼운다.
 // ---------------------------------------------------------------------------
 // setAnimationLoop의 콜백은 (시간, XRFrame)을 받는다. frame은 XR 세션 중에만
 // 들어오고, 세션 밖에서는 undefined다.
-renderer.setAnimationLoop((_time, frame) => {
+let lastFrameTime = 0;
+
+renderer.setAnimationLoop((time, frame) => {
+  // setAnimationLoop은 밀리초 타임스탬프를 준다. 첫 프레임은 이전 값이 없어
+  // dt가 통째로 튀므로 버린다. 상한을 두는 건 탭이 백그라운드로 갔다 오면
+  // dt가 몇 초짜리로 들어와서 다리가 순간이동하기 때문이다.
+  const dt = lastFrameTime === 0 ? 0 : Math.min((time - lastFrameTime) / 1000, 0.1);
+  lastFrameTime = time;
+
+  roach.pose(speedSlider === null ? 0 : Number(speedSlider.value), dt);
+
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();
     if (referenceSpace !== null) {
@@ -599,7 +631,7 @@ renderer.setAnimationLoop((_time, frame) => {
 });
 
 // ---------------------------------------------------------------------------
-// 8) AR 세션 진입
+// 9) AR 세션 진입
 //    three.js에 ARButton 애드온이 있지만, 여기서는 직접 짠다.
 //    세션 수명주기(요청 → setSession → end)가 이 작품의 뼈대이고,
 //    애드온이 숨기는 게 바로 그 부분이다.
@@ -671,7 +703,7 @@ enterButton.addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9) 지원 여부 확인
+// 10) 지원 여부 확인
 //    navigator.xr은 secure context(https 또는 localhost)에서만 존재한다.
 //    맥의 LAN IP로 http 접속하면 여기서 바로 걸린다 — 그게 adb reverse를
 //    쓰는 이유다.

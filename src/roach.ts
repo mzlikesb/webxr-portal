@@ -43,8 +43,14 @@ const SCARE_RADIUS = 0.35;
 /** 놀라는 기준이 되는 접근 속도(m/s). 가만히 있는 건 위협이 아니다. */
 const SCARE_APPROACH = 0.25;
 
-/** 원점에서 이만큼 멀어지면 돌아오도록 방향을 튼다(m). */
-const WANDER_RADIUS = 0.08;
+/** 돌아다니는 영역의 반지름(m). 이 원의 둘레가 '벽'이다. */
+const WANDER_RADIUS = 0.12;
+
+/** 벽에서 이 거리 안에 들어오면 벽을 따라가기 시작한다(m). */
+const EDGE_BAND = 0.035;
+
+/** 벽을 따라갈 때 유지하려는 간격(m). */
+const EDGE_HUG = 0.012;
 
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 const rand = (lo: number, hi: number): number => lo + Math.random() * (hi - lo);
@@ -407,6 +413,10 @@ export function makeRoach(): Roach {
   let threatZ = 0;
   /** 직전 프레임의 위협까지 거리. 접근 속도를 재는 데 쓴다. */
   let prevThreatDistance = Infinity;
+  /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
+  let edgeSide = Math.random() < 0.5 ? 1 : -1;
+  /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
+  let wallOnRight = 0;
 
   let heading = Math.random() * Math.PI * 2;
   /** 지금 내고 있는 속도(m/s). */
@@ -523,12 +533,40 @@ export function makeRoach(): Roach {
 
     const headingBefore = heading;
 
-    // 너무 멀어지면 원점 쪽으로 튼다. 미리보기에서 화면 밖으로 나가지 않게.
-    // 얼어붙어 있을 때는 조향도 멈춘다 — 미동도 없어야 한다.
+    // ── 주촉성: 벽에 몸을 붙이고 따라간다 ──
+    //
+    // 바퀴벌레는 열린 공간을 가로지르지 않는다. 상자에 넣으면 가장자리에
+    // 붙어서 둘레를 돈다. 이게 질주 다음으로 특징적인 행동이고, 이걸 넣기
+    // 전까지는 아무리 다리를 잘 움직여도 '벌레처럼 돌아다닌다'는 느낌이
+    // 안 난다.
+    //
+    // 벽 쪽으로 밀지도, 중앙으로 되돌리지도 않는다. 벽의 '접선' 방향을
+    // 목표 삼고, 간격이 틀어진 만큼만 법선 성분을 섞는다.
     const away = Math.hypot(root.position.x, root.position.z);
-    if (state !== 'startle' && away > WANDER_RADIUS) {
-      const home = Math.atan2(-root.position.x, -root.position.z);
-      heading += wrapAngle(home - heading) * Math.min(1, dt * 2);
+    wallOnRight = 0;
+
+    // 멈춰 있을 때는 조향하지 않는다. 안 그러면 벽 옆에 선 채로 각도만
+    // 영원히 맞추느라 제자리에서 빙빙 돈다 — 멈춤이 멈춤이 아니게 된다.
+    if (state !== 'startle' && speed > 0.005 && away > 0.001) {
+      const gap = WANDER_RADIUS - away; // 벽까지 남은 거리. 음수면 넘어갔다.
+      const nx = root.position.x / away; // 벽을 향하는 바깥 방향
+      const nz = root.position.z / away;
+
+      if (gap < EDGE_BAND) {
+        // 접선. edgeSide가 도는 방향을 정한다.
+        const tx = -nz * edgeSide;
+        const tz = nx * edgeSide;
+        // 간격이 EDGE_HUG보다 좁으면 안으로, 넓으면 바깥으로 당긴다.
+        const correction = clamp((EDGE_HUG - gap) * 10, -1, 1);
+        const want = Math.atan2(tx - nx * correction, tz - nz * correction);
+        heading += wrapAngle(want - heading) * Math.min(1, dt * 7);
+
+        // 벽이 몸의 왼쪽인지 오른쪽인지. 오른쪽 방향 벡터와 바깥 방향의 내적.
+        wallOnRight = nx * Math.cos(heading) - nz * Math.sin(heading);
+
+        // 가끔 도는 방향을 바꾼다. 늘 같은 쪽으로만 돌면 궤도처럼 보인다.
+        if (Math.random() < dt * 0.15) edgeSide = -edgeSide;
+      }
     }
 
     // 이번 프레임에 '실제로' 돈 각. turnRate만 보면 안 되는 게, 위의 복귀
@@ -673,7 +711,10 @@ export function makeRoach(): Roach {
           // 다리와 같은 변환이다. 마디는 +X로 뻗는데 더듬이는 앞(+Z)을 향해야
           // 하므로, '오른쪽에서 앞으로 잰 각'을 Y 회전으로 바꿔 준다.
           // 오른쪽은 -각, 왼쪽은 π+각. 이걸 빼먹으면 더듬이가 옆뒤를 가리킨다.
-          const spread = 1.0 + Math.sin(t) * 0.3;
+          // 벽을 따라갈 때는 벽 쪽 더듬이를 바깥으로 눕혀 벽을 훑는다.
+          // spread가 작을수록 옆을 향한다. 반대쪽 더듬이는 조금 더 앞을 본다.
+          const toWall = clamp(antenna.side * wallOnRight, 0, 1);
+          const spread = 1.0 - toWall * 0.45 + (1 - toWall) * 0.12 + Math.sin(t) * 0.3;
           segment.rotation.y = antenna.side > 0 ? -spread : Math.PI + spread;
           segment.rotation.z = 0.45 + Math.sin(t * 0.8) * 0.25;
         } else {

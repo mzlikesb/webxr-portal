@@ -61,21 +61,7 @@ window.addEventListener('resize', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4) 조명
-//    AR이지만 실제 방의 조명 정보는 들어오지 않는다(WebXR light estimation은
-//    Quest 브라우저에서 아직 못 쓴다). 그래서 방 조명을 '가정'해서 넣는다.
-//    HemisphereLight는 위/아래 두 색을 섞는 공짜 환경광이고, DirectionalLight가
-//    면마다 명암 차이를 만들어 큐브가 입체로 보이게 한다.
-// ---------------------------------------------------------------------------
-const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444455, 2);
-scene.add(hemisphereLight);
-
-const directionalLight = new THREE.DirectionalLight(0xffffff, 2);
-directionalLight.position.set(1, 2, 1);
-scene.add(directionalLight);
-
-// ---------------------------------------------------------------------------
-// 5) 평면 감지
+// 4) 평면 감지
 //
 //    WebXR 런타임이 방을 스캔해서 만든 평면들을 매 프레임 XRFrame.detectedPlanes로
 //    준다. Quest에서는 '공간 설정'(룸 스캔) 데이터가 출처라서, 스캔을 한 적이
@@ -125,10 +111,10 @@ function buildPlaneGeometry(plane: XRPlane): THREE.BufferGeometry {
 }
 
 function buildPlaneMesh(plane: XRPlane): THREE.Mesh {
-  const isWall = plane.orientation === 'vertical';
+  const isVertical = plane.orientation === 'vertical';
 
   const material = new THREE.MeshBasicMaterial({
-    color: isWall ? 0x33ff88 : 0x3366ff,
+    color: isVertical ? 0x33ff88 : 0x3366ff,
     transparent: true,
     opacity: 0.25,
     // 평면은 양쪽에서 다 보여야 한다. 뒤에서 보면 사라지면 곤란하다.
@@ -137,7 +123,10 @@ function buildPlaneMesh(plane: XRPlane): THREE.Mesh {
     depthWrite: false,
   });
 
-  return new THREE.Mesh(buildPlaneGeometry(plane), material);
+  const mesh = new THREE.Mesh(buildPlaneGeometry(plane), material);
+  // 포털이 확정된 뒤에 새로 들어오는 평면도 숨겨 둔다.
+  mesh.visible = portalPlaced === false;
+  return mesh;
 }
 
 function disposePlane(plane: XRPlane): void {
@@ -188,7 +177,7 @@ function updatePlanes(frame: XRFrame, referenceSpace: XRReferenceSpace): void {
     planeMatrix.fromArray(pose.transform.matrix);
     mesh.position.setFromMatrixPosition(planeMatrix);
     mesh.quaternion.setFromRotationMatrix(planeMatrix);
-    // three.js는 보통 render() 때 행렬을 갱신한다. 하지만 아래 ⑥의 레이캐스트가
+    // three.js는 보통 render() 때 행렬을 갱신한다. 하지만 아래 ⑤의 레이캐스트가
     // render보다 먼저 돌고 matrixWorld를 읽으므로, 여기서 직접 갱신해 둔다.
     // 안 하면 평면이 생긴 첫 프레임에 행렬이 단위행렬이라 엉뚱한 데를 맞춘다.
     mesh.updateMatrixWorld();
@@ -227,9 +216,9 @@ function reportPlanes(detectedPlanes: XRPlaneSet): void {
 }
 
 // ---------------------------------------------------------------------------
-// 6) 포털 자리 잡기
+// 5) 포털 자리 잡기
 //
-//    시선 레이를 쏴서 ⑤의 벽 메시와 교차시키고, 거기에 포털 미리보기를 붙여
+//    시선 레이를 쏴서 ④의 벽 메시와 교차시키고, 거기에 포털 미리보기를 붙여
 //    둔다. 벽이 안 잡히면 눈앞 1.5m에 세운다(평면 감지가 아예 안 되는 기기의
 //    대체 경로도 겸한다). 트리거를 당기면 그 자리에 확정된다.
 // ---------------------------------------------------------------------------
@@ -248,18 +237,16 @@ const portalEdgeMaterial = new THREE.LineBasicMaterial({ color: 0x66ccff });
 const portal = new THREE.Group();
 scene.add(portal);
 
-{
-  // PlaneGeometry는 X-Y에 서서 +Z를 향한다. 아래 orientPortal이 그룹의 로컬
-  // +Z를 벽의 법선에 맞추므로, 여기서 따로 돌릴 필요가 없다.
-  const surface = new THREE.Mesh(
-    new THREE.PlaneGeometry(PORTAL_WIDTH, PORTAL_HEIGHT),
-    portalSurfaceMaterial,
-  );
-  portal.add(surface);
+// PlaneGeometry는 X-Y에 서서 +Z를 향한다. orientPortal이 이 그룹의 로컬 +Z를
+// 벽의 법선에 맞추므로, 지오메트리를 따로 돌릴 필요가 없다.
+const portalShape = new THREE.PlaneGeometry(PORTAL_WIDTH, PORTAL_HEIGHT);
 
-  // 테두리. ④단계에서 안쪽은 스텐실 포털로 바뀌지만 테두리는 남는다.
-  portal.add(new THREE.LineSegments(new THREE.EdgesGeometry(surface.geometry), portalEdgeMaterial));
-}
+/** 확정 전에 보여 주는 반투명 사각형. 확정되면 숨기고 진짜 포털로 바꾼다. */
+const portalPreview = new THREE.Mesh(portalShape, portalSurfaceMaterial);
+portal.add(portalPreview);
+
+/** 테두리. 포털이 뚫린 뒤에도 남아서 '액자'가 된다. */
+portal.add(new THREE.LineSegments(new THREE.EdgesGeometry(portalShape), portalEdgeMaterial));
 
 const raycaster = new THREE.Raycaster();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
@@ -359,7 +346,7 @@ function updatePortalPreview(frame: XRFrame, referenceSpace: XRReferenceSpace): 
   const hit = raycaster.intersectObjects(wallMeshes, false)[0];
 
   if (hit !== undefined) {
-    // 벽 메시의 로컬 +Y가 평면의 법선이다(⑤에서 지오메트리를 X-Z로 눕혔으므로).
+    // 벽 메시의 로컬 +Y가 평면의 법선이다(④에서 지오메트리를 X-Z로 눕혔으므로).
     portalNormal.set(0, 1, 0).applyQuaternion(hit.object.quaternion).normalize();
     // 법선이 벽 안쪽을 향할 수도 있다. 보는 사람 쪽으로 뒤집는다.
     if (portalNormal.dot(pointerDirection) > 0) portalNormal.negate();
@@ -391,8 +378,16 @@ function placePortal(): void {
 
   portalPlaced = true;
   pointerRay.visible = false;
-  portalSurfaceMaterial.opacity = 0.7;
+
+  // 미리보기를 끄고 진짜 포털을 켠다.
+  portalPreview.visible = false;
+  portalMask.visible = true;
+  portalWorld.visible = true;
   portalEdgeMaterial.color.setHex(0xffcc33);
+
+  // 평면 시각화는 디버그용이었다. 켜 둔 채로 두면 벽 오버레이가 포털 앞을
+  // 가린다.
+  for (const mesh of planeMeshes.values()) mesh.visible = false;
 
   log(`포털 확정: ${portalPoint.x.toFixed(2)}, ${portalPoint.y.toFixed(2)}, ${portalPoint.z.toFixed(2)}`);
 }
@@ -400,8 +395,112 @@ function placePortal(): void {
 function resetPortal(): void {
   portalPlaced = false;
   pointerRay.visible = false;
-  portalSurfaceMaterial.opacity = 0.25;
+  portalPreview.visible = true;
+  portalMask.visible = false;
+  portalWorld.visible = false;
   portalEdgeMaterial.color.setHex(0x66ccff);
+}
+
+// ---------------------------------------------------------------------------
+// 6) 포털 너머 공간 (스텐실)
+//
+//    원리는 간단하다. 두 번에 나눠 그린다.
+//      1. 포털 사각형을 '색도 깊이도 쓰지 않고' 그린다. 스텐실 버퍼에 1만 찍힌다.
+//      2. 너머 공간을 '스텐실이 1인 픽셀에만' 그린다.
+//    너머 공간의 물체들은 실제로 벽 뒤 좌표에 있다. 가려 주는 물체가 없으니
+//    그냥 그리면 벽을 뚫고 둥둥 떠 보이는데, 2번의 스텐실 테스트가 포털 구멍
+//    밖의 픽셀을 전부 버려서 '구멍으로만 보이는' 상태를 만든다.
+//
+//    AR이라 유리한 점이 하나 있다. 포털 밖은 우리가 아무것도 안 그리므로
+//    투명하게 남고, 거기에 패스스루가 합성된다. 즉 '벽을 가리는 가짜 벽'을
+//    그릴 필요가 없다 — VR에서 같은 기법을 쓸 때 필요한 단계가 통째로 빠진다.
+//
+//    이 기법이 성립하려면 스텐실 버퍼가 있어야 한다. ①에서 WebGLRenderer에
+//    stencil: true를 준 것이 XRWebGLLayer/XRProjectionLayer까지 전달돼
+//    DEPTH24_STENCIL8로 잡힌다.
+// ---------------------------------------------------------------------------
+const PORTAL_STENCIL_REF = 1;
+const PORTAL_DEPTH = 9; // 너머 공간의 깊이(m)
+
+/** 1단계: 스텐실에 표시만 하는 사각형. */
+const portalMask = new THREE.Mesh(
+  portalShape,
+  new THREE.MeshBasicMaterial({
+    colorWrite: false, // 색을 쓰지 않는다 — 화면에는 아무것도 안 나온다
+    depthWrite: false, // 깊이도 쓰지 않는다 — 너머 공간을 가리면 안 되니까
+    stencilWrite: true,
+    stencilRef: PORTAL_STENCIL_REF,
+    stencilFunc: THREE.AlwaysStencilFunc, // 깊이 테스트만 통과하면 무조건
+    stencilZPass: THREE.ReplaceStencilOp, // 스텐실 값을 ref로 덮어쓴다
+  }),
+);
+// renderOrder로 '마스크 먼저, 내용 나중'을 보장한다. three.js는 불투명 물체를
+// renderOrder 순으로 먼저 정렬한다.
+portalMask.renderOrder = 0;
+portalMask.visible = false;
+portal.add(portalMask);
+
+/** 2단계: 너머 공간. portal의 자식이라 포털이 놓인 자세를 그대로 따라간다.
+ *  로컬 -Z가 벽 안쪽이므로, 내용물을 z<0에 두면 '벽 너머'가 된다. */
+const portalWorld = new THREE.Group();
+portalWorld.visible = false;
+portal.add(portalWorld);
+
+/** 재질에 '스텐실이 ref와 같은 픽셀에만 그려라'를 건다. */
+function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
+  const material = object.material as THREE.Material;
+  material.stencilWrite = true;
+  material.stencilRef = PORTAL_STENCIL_REF;
+  material.stencilFunc = THREE.EqualStencilFunc;
+  object.renderOrder = 1; // 마스크보다 나중
+}
+
+{
+  // 복도. BackSide라서 안쪽 면만 그려진다 — 상자 안에 들어와 있는 셈이다.
+  // 포털 구멍보다 살짝 크게 만들어서, 비스듬히 보면 측벽이 원근으로 모여
+  // 깊이가 읽히게 한다.
+  const corridor = new THREE.Mesh(
+    new THREE.BoxGeometry(PORTAL_WIDTH + 0.2, PORTAL_HEIGHT + 0.3, PORTAL_DEPTH),
+    new THREE.MeshStandardMaterial({
+      color: 0x2a3b4d,
+      roughness: 0.95,
+      side: THREE.BackSide,
+    }),
+  );
+  corridor.position.z = -PORTAL_DEPTH / 2;
+  clipToPortal(corridor);
+  portalWorld.add(corridor);
+
+  // 일정 간격의 테두리. 같은 크기의 사각형이 작아지며 멀어지는 게
+  // 사람 눈에 가장 잘 먹는 깊이 단서다.
+  const ribShape = new THREE.PlaneGeometry(PORTAL_WIDTH + 0.18, PORTAL_HEIGHT + 0.28);
+  const ribEdges = new THREE.EdgesGeometry(ribShape);
+
+  for (let i = 1; i <= 5; i += 1) {
+    const rib = new THREE.LineSegments(
+      ribEdges,
+      new THREE.LineBasicMaterial({
+        color: 0x88ccff,
+        transparent: true,
+        // 멀수록 흐리게. 거리감을 한 번 더 준다.
+        opacity: 0.9 - i * 0.15,
+      }),
+    );
+    rib.position.z = -i * 1.4;
+    clipToPortal(rib);
+    portalWorld.add(rib);
+  }
+
+  // 너머 공간은 자기 조명을 가진다. 거리에 따라 꺼지는 PointLight가
+  // 복도 끝을 어둠으로 만들어 준다.
+  const lamp = new THREE.PointLight(0x99ddff, 6, PORTAL_DEPTH);
+  lamp.position.z = -1.2;
+  portalWorld.add(lamp);
+
+  // 아주 약한 환경광. 이게 없으면 램프가 닿지 않는 면이 완전히 검게 죽어서
+  // 형태가 안 읽힌다. three.js의 조명은 부모와 무관하게 씬 전체에 작용하지만,
+  // 지금 조명을 받는 재질은 복도뿐이라 여기 두는 게 읽기 좋다.
+  portalWorld.add(new THREE.AmbientLight(0x335577, 1.5));
 }
 
 // ---------------------------------------------------------------------------

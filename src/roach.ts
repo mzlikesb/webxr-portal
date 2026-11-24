@@ -214,7 +214,12 @@ function buildAntenna(material: THREE.Material, side: number): Antenna {
   return { segments, side };
 }
 
-function buildBody(material: THREE.Material, wingMaterial: THREE.Material): THREE.Group {
+function buildBody(
+  material: THREE.Material,
+  wingMaterial: THREE.Material,
+  legMaterial: THREE.Material,
+  eyeMaterial: THREE.Material,
+): THREE.Group {
   const body = new THREE.Group();
 
   // 바퀴벌레는 아주 납작하다. 그리고 몸 아랫면이 바닥(y=0)을 파고들면 안 된다.
@@ -239,6 +244,25 @@ function buildBody(material: THREE.Material, wingMaterial: THREE.Material): THRE
   head.position.set(0, 0.09, 0.44);
   body.add(head);
 
+  // 눈. 머리 양옆에 붙은 납작한 콩 모양. 작지만 이게 없으면 머리가
+  // 그냥 덩어리로 보인다.
+  for (const side of [1, -1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.038, 8, 6), eyeMaterial);
+    eye.scale.set(0.7, 1.1, 1.3);
+    eye.position.set(side * 0.075, 0.105, 0.455);
+    body.add(eye);
+  }
+
+  // 미병(꼬리털). 배 끝에서 뒤로 벌어진 짧은 한 쌍.
+  // 뒤에서 본 실루엣을 끝맺는 역할이다.
+  for (const side of [1, -1]) {
+    const cercus = new THREE.Mesh(limbGeometry(0.16, 0.016, 0.004), legMaterial);
+    cercus.position.set(side * 0.055, 0.09, -0.47);
+    cercus.rotation.y = side > 0 ? -(Math.PI - 0.45) : Math.PI - 0.45; // 뒤·바깥으로
+    cercus.rotation.z = -0.12;
+    body.add(cercus);
+  }
+
   // 딱지날개 한 쌍. 등을 덮는 얇은 판 두 장이 가운데서 겹친다.
   // 위에서 본 바퀴벌레의 인상은 앞가슴판 방패와 이 가운데 이음선, 둘이 거의
   // 전부다. 바깥쪽을 살짝 떨구면 등이 둥글게 말린 느낌이 난다.
@@ -262,6 +286,7 @@ export function makeRoach(): Roach {
   const shell = new THREE.MeshStandardMaterial({ color: 0x3a2416, roughness: 0.3 });
   const wingShell = new THREE.MeshStandardMaterial({ color: 0x2b190d, roughness: 0.22 });
   const limb = new THREE.MeshStandardMaterial({ color: 0x241509, roughness: 0.6 });
+  const eye = new THREE.MeshStandardMaterial({ color: 0x0b0806, roughness: 0.15 });
 
   // root는 미터 단위로 돌아다니고, model이 바퀴 단위를 미터로 줄인다.
   // 둘을 나눠 두면 '땅 위의 위치'와 '몸의 모양'이 섞이지 않는다.
@@ -272,7 +297,7 @@ export function makeRoach(): Roach {
 
   // 몸통만 따로 쥐고 있는다. 걸을 때 이 그룹만 흔들 것이다 — 고관절까지 같이
   // 흔들면 발 자국을 몸 공간으로 되돌리는 계산이 어긋난다.
-  const body = buildBody(shell, wingShell);
+  const body = buildBody(shell, wingShell, limb, eye);
   model.add(body);
 
   const antennae = [buildAntenna(limb, 1), buildAntenna(limb, -1)];
@@ -295,6 +320,17 @@ export function makeRoach(): Roach {
       knee.position.x = spec.femur;
       femur.add(knee);
       knee.add(new THREE.Mesh(limbGeometry(spec.tibia, 0.022, 0.009), limb));
+
+      // 종아리 가시. 실제 바퀴벌레 다리는 억센 가시로 덮여 있고, 가까이서
+      // 보면 이게 '벌레'라는 인상의 큰 부분을 차지한다. 뒤·아래로 눕혀 둔다.
+      for (let k = 0; k < 3; k += 1) {
+        const spine = new THREE.Mesh(new THREE.ConeGeometry(0.011, 0.055, 4), limb);
+        // ConeGeometry는 +Y로 선다. 눕혀서 마디 뒤쪽을 향하게 한다.
+        spine.rotation.z = Math.PI * 0.5 + 0.5;
+        spine.rotation.x = (k % 2 === 0 ? 1 : -1) * 0.6;
+        spine.position.x = spec.tibia * (0.3 + k * 0.25);
+        knee.add(spine);
+      }
 
       // 발목. IK가 맞추는 건 종아리 끝까지고, 이 마디는 거기서부터 바닥에
       // 눕는다. 끝점 하나로 땅을 찍는 것과 면으로 딛는 것은 실루엣이 다르다.
@@ -358,6 +394,8 @@ export function makeRoach(): Roach {
   let timer = 0;
   let phase = Math.random() * Math.PI * 2;
   let antT = Math.random() * Math.PI * 2;
+  /** 직전 프레임의 속도. 가속도를 재서 몸을 숙이는 데 쓴다. */
+  let prevSpeed = 0;
 
   const angles: JointAngles = { femurAngle: 0, kneeAngle: 0 };
 
@@ -527,8 +565,12 @@ export function makeRoach(): Roach {
     // 쉴 때는 몸을 바닥 쪽으로 낮춘다. 바퀴벌레는 멈추면 납작 엎드린다.
     body.position.y = Math.sin(phase * 2) * 0.012 * speedNorm - (1 - speedNorm) * 0.012;
     body.rotation.z = Math.sin(phase) * 0.05 * speedNorm;
-    // 달릴 때 앞을 살짝 숙인다.
-    body.rotation.x = speedNorm * 0.06;
+    // 달릴 때 앞을 살짝 숙이고, 그 위에 가감속을 얹는다.
+    // 급정거하면 코가 처박히고 출발할 땐 들린다. 관성이 있는 것처럼 보이게
+    // 하는 건 이 한 줄이고, 몸을 실제로 기울이는 것보다 훨씬 싸다.
+    const accel = (speed - prevSpeed) / dt;
+    prevSpeed = speed;
+    body.rotation.x = speedNorm * 0.06 + clamp(accel * 0.25, -0.09, 0.09);
 
     // ── 더듬이 ──
     // 걸음 위상과 무관한 자기 박자로 흔든다. 다리는 규칙적인데 더듬이만

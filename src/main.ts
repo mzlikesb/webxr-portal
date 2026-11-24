@@ -603,6 +603,18 @@ roachGround.add(groundGrid);
 const roach = makeRoach();
 roachGround.add(roach.root);
 
+// worldToLocal이 쓰는 역행렬은 행렬이 최신이어야 맞다. roachGround는 한 번
+// 놓고 움직이지 않으므로 여기서 한 번만 갱신해 두면 된다.
+roachGround.updateMatrixWorld();
+
+const viewerPosition = new THREE.Vector3();
+
+// 데스크톱에서 놀라는 걸 확인하려면 누를 데가 있어야 한다. 미리보기 카메라는
+// 가만히 있어서 '다가옴'이 영영 일어나지 않는다. 임시.
+renderer.domElement.addEventListener('pointerdown', () => {
+  roach.scare(viewerPosition.x, viewerPosition.z);
+});
+
 /** 걸음새를 눈으로 맞추려고 둔 임시 슬라이더. 바퀴가 스스로 고른 속도에 곱한다. */
 const speedSlider = document.querySelector('#speed') as HTMLInputElement | null;
 
@@ -623,7 +635,13 @@ renderer.setAnimationLoop((time, frame) => {
   const dt = lastFrameTime === 0 ? 0 : Math.min((time - lastFrameTime) / 1000, 0.1);
   lastFrameTime = time;
 
-  roach.update(dt, speedSlider === null ? 1 : Number(speedSlider.value));
+  // 보는 사람의 위치를 바퀴가 서 있는 땅의 좌표로 옮겨 넘긴다. 세션 중에는
+  // 머리 포즈가, 밖에서는 미리보기 카메라가 출처다.
+  const viewer = frame === undefined ? camera : renderer.xr.getCamera();
+  viewer.getWorldPosition(viewerPosition);
+  roachGround.worldToLocal(viewerPosition);
+
+  roach.update(dt, speedSlider === null ? 1 : Number(speedSlider.value), viewerPosition);
 
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();

@@ -37,6 +37,12 @@ const MAX_SPEED = 0.26;
 /** 몸 중심에서 발까지의 대략적인 거리(m). 회전을 걸음으로 환산할 때 쓴다. */
 const FOOT_RADIUS = 0.03;
 
+/** 이 거리 안에서 위협이 다가오면 놀란다(m). */
+const SCARE_RADIUS = 0.35;
+
+/** 놀라는 기준이 되는 접근 속도(m/s). 가만히 있는 건 위협이 아니다. */
+const SCARE_APPROACH = 0.25;
+
 /** 원점에서 이만큼 멀어지면 돌아오도록 방향을 튼다(m). */
 const WANDER_RADIUS = 0.08;
 
@@ -110,8 +116,13 @@ interface Antenna {
 export interface Roach {
   /** 땅 공간에서 움직이는 노드. 부모의 XZ 평면 위를 돌아다닌다. */
   root: THREE.Group;
-  /** 한 프레임 진행. 돌아다니기와 걸음새를 모두 처리한다. */
-  update(dt: number, speedScale: number): void;
+  /**
+   * 한 프레임 진행.
+   * @param threat 보는 사람의 위치(땅 공간). 다가오면 놀란다. 없으면 null.
+   */
+  update(dt: number, speedScale: number, threat: THREE.Vector3 | null): void;
+  /** 밖에서 강제로 놀래킨다. 위치는 땅 공간. */
+  scare(x: number, z: number): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +394,20 @@ export function makeRoach(): Roach {
   }
 
   // ── 상태 ──
+  //
+  // 돌아다니다가, 위협이 다가오면 '얼어붙고', 그 다음 '튄다'.
+  // 얼어붙는 단계가 핵심이다. 바로 도망가게 하면 그냥 빠른 물체로 보이는데,
+  // 0.2초쯤 완전히 멎었다가 터지듯 달리면 그제서야 벌레처럼 보인다.
+  type State = 'wander' | 'startle' | 'flee';
+  let state: State = 'wander';
+  /** 지금 상태가 끝날 때까지 남은 시간. */
+  let stateTimer = 0;
+  /** 마지막으로 놀란 지점(땅 공간). 여기서 멀어지는 쪽으로 튄다. */
+  let threatX = 0;
+  let threatZ = 0;
+  /** 직전 프레임의 위협까지 거리. 접근 속도를 재는 데 쓴다. */
+  let prevThreatDistance = Infinity;
+
   let heading = Math.random() * Math.PI * 2;
   /** 지금 내고 있는 속도(m/s). */
   let speed = 0;
@@ -424,7 +449,48 @@ export function makeRoach(): Roach {
   // 벌레가 벌레로 보이는 건 다리가 아니라 '달리다 뚝 멈추고 한참 가만히
   // 있다가 또 달리는' 리듬에서 온다. 그래서 멈추는 구간이 가장 길다.
   // ───────────────────────────────────────────────────────────────────────
-  function wander(dt: number): void {
+  function scare(x: number, z: number): void {
+    if (state !== 'wander') return;
+    state = 'startle';
+    stateTimer = rand(0.12, 0.35);
+    threatX = x;
+    threatZ = z;
+    // 즉시 멎는다. 감쇠를 거치지 않는 유일한 곳이다 — 놀란 벌레는 정말로
+    // 한 프레임에 멈춘다. 가속과 달리 급제동은 발을 늘어뜨리지 않는다.
+    targetSpeed = 0;
+    speed = 0;
+    turnRate = 0;
+  }
+
+  function beginFlee(): void {
+    state = 'flee';
+    stateTimer = rand(0.7, 1.5);
+    // 위협 반대쪽. 정확히 반대로만 가면 기계처럼 보이니 조금 흩뜨린다.
+    const away = Math.atan2(root.position.x - threatX, root.position.z - threatZ);
+    heading = away + rand(-0.5, 0.5);
+    targetSpeed = MAX_SPEED;
+    turnRate = rand(-0.4, 0.4);
+  }
+
+  function behave(dt: number): void {
+    if (state === 'startle') {
+      // 아무것도 하지 않는다. 방향도 안 틀고 움직이지도 않는다.
+      stateTimer -= dt;
+      if (stateTimer <= 0) beginFlee();
+      return;
+    }
+
+    if (state === 'flee') {
+      stateTimer -= dt;
+      heading += turnRate * dt;
+      if (stateTimer <= 0) {
+        state = 'wander';
+        targetSpeed = 0;
+        timer = rand(0.3, 0.9); // 숨 돌리고 다시 평소대로
+      }
+      return;
+    }
+
     timer -= dt;
 
     if (timer <= 0) {
@@ -443,6 +509,11 @@ export function makeRoach(): Roach {
       }
     }
 
+    heading += turnRate * dt;
+  }
+
+  /** 상태와 무관하게 매 프레임 도는 이동 처리. */
+  function move(dt: number): void {
     // 목표 속도를 실제 속도가 쫓아간다. 감쇠율이 높아서 체감은 거의 즉발이지만,
     // 불연속이 사라지는 것이 중요하다. 전에는 속도가 0에서 최대로 한 프레임에
     // 튀는 바람에, 땅에 박힌 발이 다음 걸음 전에 쭉 끌려가 다리가 늘어났다.
@@ -451,11 +522,11 @@ export function makeRoach(): Roach {
     if (Math.abs(speed - targetSpeed) < 0.002) speed = targetSpeed;
 
     const headingBefore = heading;
-    heading += turnRate * dt;
 
     // 너무 멀어지면 원점 쪽으로 튼다. 미리보기에서 화면 밖으로 나가지 않게.
+    // 얼어붙어 있을 때는 조향도 멈춘다 — 미동도 없어야 한다.
     const away = Math.hypot(root.position.x, root.position.z);
-    if (away > WANDER_RADIUS) {
+    if (state !== 'startle' && away > WANDER_RADIUS) {
       const home = Math.atan2(-root.position.x, -root.position.z);
       heading += wrapAngle(home - heading) * Math.min(1, dt * 2);
     }
@@ -469,10 +540,27 @@ export function makeRoach(): Roach {
     root.rotation.y = heading;
   }
 
-  function update(dt: number, speedScale: number): void {
+  function senseThreat(dt: number, threat: THREE.Vector3 | null): void {
+    if (threat === null) {
+      prevThreatDistance = Infinity;
+      return;
+    }
+
+    const distance = Math.hypot(threat.x - root.position.x, threat.z - root.position.z);
+    // +면 다가오는 중. 바퀴벌레는 '가까이 있는 것'이 아니라 '갑자기 움직이는
+    // 것'에 반응한다. 거리만 보면 가만히 선 사람 앞에서 영영 도망만 친다.
+    const approach = prevThreatDistance === Infinity ? 0 : (prevThreatDistance - distance) / dt;
+    prevThreatDistance = distance;
+
+    if (distance < SCARE_RADIUS && approach > SCARE_APPROACH) scare(threat.x, threat.z);
+  }
+
+  function update(dt: number, speedScale: number, threat: THREE.Vector3 | null): void {
     if (dt <= 0) return;
 
-    wander(dt);
+    senseThreat(dt, threat);
+    behave(dt);
+    move(dt);
 
     // 제자리에서 돌기만 해도 발은 옮겨 디뎌야 한다. 몸 중심에서 발까지가
     // 대략 FOOT_RADIUS이므로, 각속도에 그걸 곱하면 발이 도는 속도가 나온다.
@@ -597,7 +685,7 @@ export function makeRoach(): Roach {
   }
 
   plantAll();
-  update(0.001, 1);
+  update(0.001, 1, null);
 
-  return { root, update };
+  return { root, update, scare };
 }

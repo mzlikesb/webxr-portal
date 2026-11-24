@@ -232,7 +232,10 @@ const portalSurfaceMaterial = new THREE.MeshBasicMaterial({
   transparent: true,
   opacity: 0.25,
 });
-const portalEdgeMaterial = new THREE.LineBasicMaterial({ color: 0x66ccff });
+const portalEdgeMaterial = new THREE.LineBasicMaterial({
+  color: 0x66ccff,
+  transparent: true,
+});
 
 const portal = new THREE.Group();
 scene.add(portal);
@@ -399,6 +402,8 @@ function resetPortal(): void {
   portalMask.visible = false;
   portalWorld.visible = false;
   portalEdgeMaterial.color.setHex(0x66ccff);
+  // 페이드 중에 세션이 끝났을 수 있다. 다음 세션은 멀쩡한 상태로 시작한다.
+  for (const entry of portalFadeMaterials) entry.material.opacity = entry.baseOpacity;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +439,17 @@ const portalMask = new THREE.Mesh(
     stencilZPass: THREE.ReplaceStencilOp, // 스텐실 값을 ref로 덮어쓴다
   }),
 );
-// renderOrder로 '마스크 먼저, 내용 나중'을 보장한다. three.js는 불투명 물체를
-// renderOrder 순으로 먼저 정렬한다.
-portalMask.renderOrder = 0;
+// 마스크는 반드시 '모든 것보다 먼저' 그려져야 한다.
+//
+// three.js는 불투명 물체를 renderOrder로 먼저 정렬하지만, 값이 같으면
+// material.id 순 — 즉 재질을 만든 순서로 그린다. 기본값 0짜리 오브젝트를
+// 하나만 추가해도 마스크와 순서가 코드 작성 순서에 좌우된다.
+//
+// 그게 위험한 이유: 포털보다 앞에 있으면서 깊이를 쓰는 물체가 마스크보다
+// 먼저 그려지면, 마스크가 그 픽셀에서 깊이 테스트에 떨어져 스텐실을 못 찍는다.
+// 포털 일부가 뜯겨 나간 것처럼 보이고, 원인을 찾기가 아주 어렵다.
+// 음수를 줘서 순서를 못 넘보게 한다.
+portalMask.renderOrder = -1;
 portalMask.visible = false;
 portal.add(portalMask);
 
@@ -447,6 +460,19 @@ portalWorld.visible = false;
 portal.add(portalWorld);
 
 /** 재질에 '스텐실이 ref와 같은 픽셀에만 그려라'를 건다. */
+/** 가까이 갔을 때 같이 흐려질 재질들.
+ *
+ *  원래 투명도를 같이 들고 다닌다. 리브는 거리별로 서로 다른 opacity를 갖는데,
+ *  페이드가 그 값을 덮어쓰면 깊이 단서가 사라지기 때문이다. 페이드는 덮어쓰는
+ *  게 아니라 원래 값에 곱한다. */
+const portalFadeMaterials: { material: THREE.Material; baseOpacity: number }[] = [];
+
+function registerFadeMaterial(material: THREE.Material): void {
+  portalFadeMaterials.push({ material, baseOpacity: material.opacity });
+}
+
+registerFadeMaterial(portalEdgeMaterial);
+
 function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
   const material = object.material as THREE.Material;
   material.stencilWrite = true;
@@ -465,8 +491,12 @@ function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
       color: 0x2a3b4d,
       roughness: 0.95,
       side: THREE.BackSide,
+      // 페이드를 위해 처음부터 transparent로 둔다. 런타임에 이 값을 바꾸면
+      // 셰이더가 다시 컴파일돼서 그 프레임이 튄다.
+      transparent: true,
     }),
   );
+  registerFadeMaterial(corridor.material as THREE.Material);
   corridor.position.z = -PORTAL_DEPTH / 2;
   clipToPortal(corridor);
   portalWorld.add(corridor);
@@ -489,6 +519,7 @@ function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
     rib.position.z = -i * 1.4;
     clipToPortal(rib);
     portalWorld.add(rib);
+    registerFadeMaterial(rib.material as THREE.Material);
   }
 
   // 너머 공간은 자기 조명을 가진다. 거리에 따라 꺼지는 PointLight가
@@ -501,6 +532,45 @@ function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
   // 형태가 안 읽힌다. three.js의 조명은 부모와 무관하게 씬 전체에 작용하지만,
   // 지금 조명을 받는 재질은 복도뿐이라 여기 두는 게 읽기 좋다.
   portalWorld.add(new THREE.AmbientLight(0x335577, 1.5));
+}
+
+// 포털 평면에 얼굴을 들이밀면 두 가지가 깨진다. 카메라의 near(1cm)가 마스크
+// 사각형을 잘라서 포털이 가장자리부터 뜯겨 나가고, 평면을 넘는 순간 마스크가
+// 백페이스 컬링으로 사라진다. 더 나쁜 건 그 사이 구간인데, 두 눈 간격이 6.4cm라
+// 한 눈은 포털을 보고 다른 눈은 못 보는 상태가 반드시 생긴다. 보는 사람이
+// 멀미하는 종류의 깨짐이다.
+//
+// 그 구간에 도달하기 전에 포털을 흐려서 없앤다. 통과를 지원하려면 더 큰 작업이
+// 필요한데(⑥에서 다룬 기법들), 이 작품의 범위에서는 이걸로 충분하다.
+const PORTAL_FADE_FULL_AT = 0.3; // 이보다 멀면 완전히 보인다
+const PORTAL_FADE_GONE_AT = 0.08; // 이보다 가까우면 완전히 사라진다
+
+const headPosition = new THREE.Vector3();
+const portalFacing = new THREE.Vector3();
+const headToPortal = new THREE.Vector3();
+
+function updatePortalFade(): void {
+  renderer.xr.getCamera().getWorldPosition(headPosition);
+
+  // 포털 그룹의 로컬 +Z가 법선이다(orientPortal이 그렇게 맞춰 놨다).
+  portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
+  // 평면까지의 '부호 있는' 거리. 뒤로 넘어가면 음수가 되므로,
+  // 평면을 넘은 경우도 같은 식으로 처리된다.
+  const distance = headToPortal.subVectors(headPosition, portal.position).dot(portalFacing);
+
+  const visibility = THREE.MathUtils.smoothstep(
+    distance,
+    PORTAL_FADE_GONE_AT,
+    PORTAL_FADE_FULL_AT,
+  );
+
+  // 완전히 투명해지면 아예 그리지 않는다. 스텐실까지 멈춰야 깨끗하다.
+  portalMask.visible = visibility > 0;
+  portalWorld.visible = visibility > 0;
+
+  for (const entry of portalFadeMaterials) {
+    entry.material.opacity = entry.baseOpacity * visibility;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,7 +586,11 @@ renderer.setAnimationLoop((_time, frame) => {
     const referenceSpace = renderer.xr.getReferenceSpace();
     if (referenceSpace !== null) {
       updatePlanes(frame, referenceSpace);
-      if (portalPlaced === false) updatePortalPreview(frame, referenceSpace);
+      if (portalPlaced === false) {
+        updatePortalPreview(frame, referenceSpace);
+      } else {
+        updatePortalFade();
+      }
     }
   }
 

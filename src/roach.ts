@@ -87,6 +87,8 @@ interface Leg {
   spec: LegSpec;
   /** 왼쪽 -1, 오른쪽 +1. */
   side: number;
+  /** 앞 0, 가운데 1, 뒤 2. */
+  index: number;
   /** 삼각대 구분. 같은 값끼리 동시에 움직인다. */
   tripod: number;
   /** 고관절 위치(몸 공간). */
@@ -294,6 +296,47 @@ function buildBody(
   return body;
 }
 
+/**
+ * 접촉 그림자.
+ *
+ * AR에서는 실제 방의 조명 방향을 알 수 없어서 제대로 된 그림자를 드리울 수
+ * 없다. 그런데 그림자가 아예 없으면 물체가 표면 위에 '떠' 보인다 — 바닥에
+ * 놓인 느낌을 만드는 건 형태가 아니라 접지면의 어두움이다.
+ *
+ * 그래서 가운데가 진하고 가장자리로 흐려지는 얼룩 하나를 몸 밑에 깔아 둔다.
+ * 방향은 없고 '여기 뭔가 닿아 있다'만 말한다. 흔히 쓰는 타협이다.
+ */
+function makeContactShadow(): THREE.Mesh {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+
+  const ctx = canvas.getContext('2d');
+  if (ctx !== null) {
+    const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    gradient.addColorStop(0, 'rgba(0,0,0,0.5)');
+    gradient.addColorStop(0.45, 'rgba(0,0,0,0.28)');
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const shadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(ROACH_LENGTH * 1.5, ROACH_LENGTH * 0.8),
+    new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false, // 그림자가 깊이를 쓰면 다리가 그 위에서 잘린다
+    }),
+  );
+  shadow.rotation.x = -Math.PI / 2; // 바닥에 눕힌다
+  shadow.position.y = 0.0005; // 바닥과 겹쳐 z-fighting이 나지 않게
+  shadow.renderOrder = -1; // 몸보다 먼저
+  return shadow;
+}
+
 // ---------------------------------------------------------------------------
 
 export function makeRoach(): Roach {
@@ -311,6 +354,9 @@ export function makeRoach(): Roach {
   const model = new THREE.Group();
   model.scale.setScalar(ROACH_LENGTH);
   root.add(model);
+  // root는 미터 단위이고 Y 회전만 하므로, 그림자를 여기 붙이면 몸이
+  // 앞뒤로 숙이거나 좌우로 기울어도 바닥에 평평하게 붙어 있다.
+  root.add(makeContactShadow());
 
   // 몸통만 따로 쥐고 있는다. 걸을 때 이 그룹만 흔들 것이다 — 고관절까지 같이
   // 흔들면 발 자국을 몸 공간으로 되돌리는 계산이 어긋난다.
@@ -381,6 +427,7 @@ export function makeRoach(): Roach {
         phaseOffset: rand(-0.1, 0.1),
         spec,
         side,
+        index,
         tripod,
         hipX,
         restFootX,
@@ -404,7 +451,7 @@ export function makeRoach(): Roach {
   // 돌아다니다가, 위협이 다가오면 '얼어붙고', 그 다음 '튄다'.
   // 얼어붙는 단계가 핵심이다. 바로 도망가게 하면 그냥 빠른 물체로 보이는데,
   // 0.2초쯤 완전히 멎었다가 터지듯 달리면 그제서야 벌레처럼 보인다.
-  type State = 'wander' | 'startle' | 'flee';
+  type State = 'wander' | 'startle' | 'flee' | 'groom';
   let state: State = 'wander';
   /** 지금 상태가 끝날 때까지 남은 시간. */
   let stateTimer = 0;
@@ -413,6 +460,10 @@ export function makeRoach(): Roach {
   let threatZ = 0;
   /** 직전 프레임의 위협까지 거리. 접근 속도를 재는 데 쓴다. */
   let prevThreatDistance = Infinity;
+  /** 더듬이를 닦고 있는 쪽. +면 오른쪽. */
+  let groomSide = 1;
+  /** 그루밍 동작의 자체 시계. */
+  let groomT = 0;
   /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
   let edgeSide = Math.random() < 0.5 ? 1 : -1;
   /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
@@ -490,6 +541,25 @@ export function makeRoach(): Roach {
       return;
     }
 
+    if (state === 'groom') {
+      stateTimer -= dt;
+      groomT += dt;
+      if (stateTimer <= 0) {
+        state = 'wander';
+        timer = rand(0.3, 1.0);
+        // 닦던 앞다리를 제자리에 다시 내려놓는다.
+        for (const leg of legs) {
+          if (leg.index === 0 && leg.side === groomSide) {
+            leg.footX = toGroundX(leg.restFootX, leg.restFootZ);
+            leg.footZ = toGroundZ(leg.restFootX, leg.restFootZ);
+            leg.footLift = 0;
+            leg.swinging = false;
+          }
+        }
+      }
+      return;
+    }
+
     if (state === 'flee') {
       stateTimer -= dt;
       heading += turnRate * dt;
@@ -508,6 +578,16 @@ export function makeRoach(): Roach {
         targetSpeed = 0; // 멈춤
         turnRate = 0; // 몸만 계속 도는 일이 없게. 멈추면 완전히 멈춘다.
         timer = rand(0.4, 1.8);
+
+        // 멈춘 김에 종종 더듬이를 닦는다. 바퀴벌레는 멈춰 있는 동안 정말로
+        // 가만히 있지 않는다. 우리 바퀴는 시간의 대부분을 서서 보내므로,
+        // 그 시간이 비어 있으면 '멈춘 모형'으로 보인다.
+        if (Math.random() < 0.4) {
+          state = 'groom';
+          stateTimer = rand(1.5, 3.5);
+          groomSide = Math.random() < 0.5 ? 1 : -1;
+          groomT = 0;
+        }
       } else if (Math.random() < 0.18) {
         targetSpeed = rand(0.18, MAX_SPEED); // 가끔 확 달린다
         timer = rand(0.25, 0.5);
@@ -623,7 +703,21 @@ export function makeRoach(): Roach {
     // 멈춰 있으면 phaseRate가 0이라 나눌 수 없다. 그때는 보폭도 0이다.
     const stride = phaseRate > 0 ? (speed * Math.PI) / phaseRate : 0;
 
+    // 그루밍 동작의 당김 주기. 0에서 1 사이를 오간다.
+    const groomPull = state === 'groom' ? Math.sin(groomT * 7) * 0.5 + 0.5 : 0;
+
     for (const leg of legs) {
+      // 닦는 중인 앞다리는 IK를 건너뛰고 손으로 쓴 자세를 쓴다.
+      // 발이 땅이 아니라 입을 향하므로, 발 위치에서 각도를 푸는 방식이
+      // 애초에 들어맞지 않는다. 다섯 다리는 그대로 몸을 지탱한다.
+      if (state === 'groom' && leg.index === 0 && leg.side === groomSide) {
+        leg.hip.rotation.y = (leg.side > 0 ? -1 : 1) * (1.25 + groomPull * 0.18);
+        leg.femur.rotation.z = 0.85 + groomPull * 0.25;
+        leg.knee.rotation.z = -1.75 - groomPull * 0.35;
+        leg.tarsus.rotation.z = 0.6;
+        continue;
+      }
+
       // sin이 양수인 반주기에 발을 뗀다. 삼각대마다 부호가 반대라
       // 한쪽이 뗄 때 다른 쪽이 딛는다. 다리마다 아주 조금씩 어긋나 있어서
       // 세 발이 동시에 '탁' 떨어지지 않는다.
@@ -711,12 +805,23 @@ export function makeRoach(): Roach {
           // 다리와 같은 변환이다. 마디는 +X로 뻗는데 더듬이는 앞(+Z)을 향해야
           // 하므로, '오른쪽에서 앞으로 잰 각'을 Y 회전으로 바꿔 준다.
           // 오른쪽은 -각, 왼쪽은 π+각. 이걸 빼먹으면 더듬이가 옆뒤를 가리킨다.
+          // 닦이는 중인 더듬이는 앞다리 쪽으로 끌려 내려온다.
+          const groomed = state === 'groom' && antenna.side === groomSide;
+
           // 벽을 따라갈 때는 벽 쪽 더듬이를 바깥으로 눕혀 벽을 훑는다.
           // spread가 작을수록 옆을 향한다. 반대쪽 더듬이는 조금 더 앞을 본다.
           const toWall = clamp(antenna.side * wallOnRight, 0, 1);
-          const spread = 1.0 - toWall * 0.45 + (1 - toWall) * 0.12 + Math.sin(t) * 0.3;
+          const spread = groomed
+            ? 1.45 - groomPull * 0.12
+            : 1.0 - toWall * 0.45 + (1 - toWall) * 0.12 + Math.sin(t) * 0.3;
           segment.rotation.y = antenna.side > 0 ? -spread : Math.PI + spread;
-          segment.rotation.z = 0.45 + Math.sin(t * 0.8) * 0.25;
+          segment.rotation.z = groomed
+            ? -0.3 - groomPull * 0.28
+            : 0.45 + Math.sin(t * 0.8) * 0.25;
+        } else if (state === 'groom' && antenna.side === groomSide) {
+          // 아래쪽으로 말려 다리 끝을 지나간다.
+          segment.rotation.y = 0;
+          segment.rotation.z = -0.3 - groomPull * 0.2;
         } else {
           segment.rotation.y = Math.sin(t) * 0.22;
           segment.rotation.z = -0.25 + Math.sin(t * 1.3) * 0.18;

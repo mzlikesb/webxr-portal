@@ -589,11 +589,21 @@ const roachSun = new THREE.DirectionalLight(0xffffff, 2);
 roachSun.position.set(0.5, 1, 0.4);
 scene.add(roachSun);
 
-const roach = makeRoach();
-roach.root.position.set(0, 1.26, -0.13); // 임시 — 미리보기 카메라 코앞(13cm)
-scene.add(roach.root);
+// 바퀴가 돌아다닐 '땅'. 지금은 미리보기 카메라 앞에 떠 있는 가상의 바닥이다.
+// 나중에 이 그룹을 포털 안 복도 바닥이나 진짜 방 바닥에 맞추면, 바퀴 쪽
+// 코드는 한 줄도 바뀌지 않는다.
+const roachGround = new THREE.Group();
+roachGround.position.set(0, 1.2, -0.3); // 임시 — 미리보기 카메라 앞
+scene.add(roachGround);
 
-/** 걸음새를 눈으로 맞추려고 둔 임시 슬라이더. 0이면 제자리, 1이면 전력 질주. */
+// 걸음이 미끄러지는지 눈으로 보려면 바닥 무늬가 있어야 한다. 임시.
+const groundGrid = new THREE.GridHelper(0.5, 25, 0x335544, 0x223333);
+roachGround.add(groundGrid);
+
+const roach = makeRoach();
+roachGround.add(roach.root);
+
+/** 걸음새를 눈으로 맞추려고 둔 임시 슬라이더. 바퀴가 스스로 고른 속도에 곱한다. */
 const speedSlider = document.querySelector('#speed') as HTMLInputElement | null;
 
 // ---------------------------------------------------------------------------
@@ -613,7 +623,7 @@ renderer.setAnimationLoop((time, frame) => {
   const dt = lastFrameTime === 0 ? 0 : Math.min((time - lastFrameTime) / 1000, 0.1);
   lastFrameTime = time;
 
-  roach.pose(speedSlider === null ? 0 : Number(speedSlider.value), dt);
+  roach.update(dt, speedSlider === null ? 1 : Number(speedSlider.value));
 
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();

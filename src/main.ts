@@ -2,9 +2,10 @@ import * as THREE from 'three';
 
 // ---------------------------------------------------------------------------
 // 1) 화면 밖으로 상태를 내보내는 두 경로
-//    AR 세션에 들어가면 2D DOM은 보이지 않는다(Quest 브라우저는 dom-overlay를
-//    지원하지 않음). 그래서 모든 로그를 DOM과 console 양쪽에 남긴다.
-//    console은 chrome://inspect로 붙은 DevTools에서 세션 중에도 실시간으로 보인다.
+//    AR 세션에 들어가면 2D DOM은 보이지 않는다. dom-overlay를 요청하지 않으므로
+//    세션 중 화면에 있는 건 three.js가 그리는 것뿐이다. 그래서 로그를 양쪽에
+//    남긴다 — DOM은 세션에서 나온 뒤에 읽고, console은 chrome://inspect로 붙은
+//    DevTools에서 세션 중에도 실시간으로 읽는다.
 // ---------------------------------------------------------------------------
 const enterButton = document.querySelector('#enter') as HTMLButtonElement;
 const statusElement = document.querySelector('#status') as HTMLPreElement;

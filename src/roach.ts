@@ -29,7 +29,7 @@ const STEP_HEIGHT = 0.1;
 const MAX_SPEED = 0.26;
 
 /** 원점에서 이만큼 멀어지면 돌아오도록 방향을 튼다(m). */
-const WANDER_RADIUS = 0.2;
+const WANDER_RADIUS = 0.08;
 
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 const rand = (lo: number, hi: number): number => lo + Math.random() * (hi - lo);
@@ -59,6 +59,10 @@ interface Leg {
   hip: THREE.Group;
   femur: THREE.Group;
   knee: THREE.Group;
+  /** 종아리 끝의 짧은 마디. 실제 곤충은 이 부분을 바닥에 눕혀 딛는다. */
+  tarsus: THREE.Group;
+  /** 이 다리만의 미세한 위상 어긋남. 삼각대가 기계처럼 딱 맞지 않게 한다. */
+  phaseOffset: number;
   spec: LegSpec;
   /** 왼쪽 -1, 오른쪽 +1. */
   side: number;
@@ -85,6 +89,13 @@ interface Leg {
   toZ: number;
   /** 떼기 시작한 시점의 위상. 진행률을 재는 데 쓴다. */
   swingStart: number;
+}
+
+interface Antenna {
+  /** 뿌리부터 끝까지 이어진 마디들. 각 마디가 부모의 끝에 붙는다. */
+  segments: THREE.Group[];
+  /** 왼쪽 -1, 오른쪽 +1. */
+  side: number;
 }
 
 export interface Roach {
@@ -158,6 +169,39 @@ function limbGeometry(length: number, rootRadius: number, tipRadius: number): TH
   return geometry;
 }
 
+/**
+ * 더듬이 한 쌍.
+ *
+ * 다리보다 이쪽이 '살아 있다'는 인상의 대부분을 만든다. 다리는 규칙적인데
+ * 더듬이만 불규칙하게 흔들리기 때문이다. 마디마다 주파수와 위상을 다르게 줘서
+ * 전체가 한 덩어리로 움직이지 않게 한다.
+ */
+function buildAntenna(material: THREE.Material, side: number): Antenna {
+  const lengths = [0.22, 0.18, 0.15];
+  const segments: THREE.Group[] = [];
+
+  let parent: THREE.Group | null = null;
+
+  lengths.forEach((length, i) => {
+    const segment = new THREE.Group();
+    segment.rotation.order = 'YXZ';
+    segment.add(new THREE.Mesh(limbGeometry(length, 0.011 - i * 0.002, 0.008 - i * 0.002), material));
+
+    if (parent === null) {
+      // 머리 앞쪽에서 비스듬히 위·바깥으로 나간다.
+      segment.position.set(side * 0.05, 0.12, 0.52);
+    } else {
+      segment.position.x = lengths[i - 1]; // 앞 마디의 끝
+      parent.add(segment);
+    }
+
+    segments.push(segment);
+    parent = segment;
+  });
+
+  return { segments, side };
+}
+
 function buildBody(material: THREE.Material): THREE.Group {
   const body = new THREE.Group();
 
@@ -193,7 +237,14 @@ export function makeRoach(): Roach {
   const model = new THREE.Group();
   model.scale.setScalar(ROACH_LENGTH);
   root.add(model);
-  model.add(buildBody(shell));
+
+  // 몸통만 따로 쥐고 있는다. 걸을 때 이 그룹만 흔들 것이다 — 고관절까지 같이
+  // 흔들면 발 자국을 몸 공간으로 되돌리는 계산이 어긋난다.
+  const body = buildBody(shell);
+  model.add(body);
+
+  const antennae = [buildAntenna(limb, 1), buildAntenna(limb, -1)];
+  for (const antenna of antennae) body.add(antenna.segments[0]);
 
   const legs: Leg[] = [];
 
@@ -212,6 +263,13 @@ export function makeRoach(): Roach {
       knee.position.x = spec.femur;
       femur.add(knee);
       knee.add(new THREE.Mesh(limbGeometry(spec.tibia, 0.022, 0.009), limb));
+
+      // 발목. IK가 맞추는 건 종아리 끝까지고, 이 마디는 거기서부터 바닥에
+      // 눕는다. 끝점 하나로 땅을 찍는 것과 면으로 딛는 것은 실루엣이 다르다.
+      const tarsus = new THREE.Group();
+      tarsus.position.x = spec.tibia;
+      knee.add(tarsus);
+      tarsus.add(new THREE.Mesh(limbGeometry(0.13, 0.009, 0.004), limb));
 
       // ───────────────────────────────────────────────────────────────
       // 삼각보행(tripod gait).
@@ -232,6 +290,10 @@ export function makeRoach(): Roach {
         hip,
         femur,
         knee,
+        tarsus,
+        // ±0.1 안쪽의 고정된 어긋남. 매 프레임 흔들면 떨림으로 보이므로
+        // 다리마다 한 번 정해 두고 계속 쓴다.
+        phaseOffset: rand(-0.1, 0.1),
         spec,
         side,
         tripod,
@@ -258,6 +320,7 @@ export function makeRoach(): Roach {
   let turnRate = 0;
   let timer = 0;
   let phase = Math.random() * Math.PI * 2;
+  let antT = Math.random() * Math.PI * 2;
 
   const angles: JointAngles = { femurAngle: 0, kneeAngle: 0 };
 
@@ -335,14 +398,16 @@ export function makeRoach(): Roach {
 
     for (const leg of legs) {
       // sin이 양수인 반주기에 발을 뗀다. 삼각대마다 부호가 반대라
-      // 한쪽이 뗄 때 다른 쪽이 딛는다.
-      const shouldSwing = Math.sin(phase) * leg.tripod > 0;
+      // 한쪽이 뗄 때 다른 쪽이 딛는다. 다리마다 아주 조금씩 어긋나 있어서
+      // 세 발이 동시에 '탁' 떨어지지 않는다.
+      const legPhase = phase + leg.phaseOffset;
+      const shouldSwing = Math.sin(legPhase) * leg.tripod > 0;
 
       if (shouldSwing && !leg.swinging) {
         // 막 뗐다. 지금 자리에서 출발해, 앞으로 반 보폭 나간 자리에 놓는다.
         // 디딤이 끝날 때쯤 발이 쉬는 자리에서 반 보폭 뒤에 와 있게 된다.
         leg.swinging = true;
-        leg.swingStart = phase;
+        leg.swingStart = legPhase;
         leg.fromX = leg.footX;
         leg.fromZ = leg.footZ;
         leg.toX = toGroundX(leg.restFootX, leg.restFootZ) + Math.sin(heading) * stride * 0.5;
@@ -357,7 +422,7 @@ export function makeRoach(): Roach {
 
       if (leg.swinging) {
         // 반주기 동안 0 → 1. 위상으로 직접 재면 프레임 길이와 무관하다.
-        const t = clamp((phase - leg.swingStart) / Math.PI, 0, 1);
+        const t = clamp((legPhase - leg.swingStart) / Math.PI, 0, 1);
         const ease = t * t * (3 - 2 * t);
         leg.footX = leg.fromX + (leg.toX - leg.fromX) * ease;
         leg.footZ = leg.fromZ + (leg.toZ - leg.fromZ) * ease;
@@ -386,6 +451,42 @@ export function makeRoach(): Roach {
       solveLeg(leg.spec, Math.hypot(vx, vz), leg.footLift - HIP_Y, angles);
       leg.femur.rotation.z = angles.femurAngle;
       leg.knee.rotation.z = angles.kneeAngle;
+
+      // 발목은 앞 두 마디가 만든 각을 통째로 상쇄해서, 다리가 어떤 자세든
+      // 땅과 거의 나란해진다. 발을 들었을 때만 살짝 아래로 늘어뜨린다.
+      leg.tarsus.rotation.z =
+        -(angles.femurAngle + angles.kneeAngle) - 0.08 - leg.footLift * 1.2;
+    }
+
+    // ── 몸통 흔들림 ──
+    // 좌우 기울기는 걸음과 같은 주기다. 지금 딛고 있는 삼각대 쪽으로 몸이
+    // 쏠린다. 위아래는 두 배 주기 — 한 걸음에 두 번, 삼각대가 번갈아 밀어내므로.
+    body.position.y = Math.sin(phase * 2) * 0.012 * speedNorm;
+    body.rotation.z = Math.sin(phase) * 0.05 * speedNorm;
+    // 달릴 때 앞을 살짝 숙인다.
+    body.rotation.x = speedNorm * 0.06;
+
+    // ── 더듬이 ──
+    // 걸음 위상과 무관한 자기 박자로 흔든다. 다리는 규칙적인데 더듬이만
+    // 어긋나야 살아 있는 것처럼 보인다. 멈춰 있을 때도 계속 움직인다.
+    antT += dt * 2.6;
+    for (const antenna of antennae) {
+      antenna.segments.forEach((segment, i) => {
+        const t = antT * (1 + i * 0.37) + antenna.side * 1.7 + i * 2.1;
+        if (i === 0) {
+          // 뿌리 마디는 크게 휘젓는다.
+          //
+          // 다리와 같은 변환이다. 마디는 +X로 뻗는데 더듬이는 앞(+Z)을 향해야
+          // 하므로, '오른쪽에서 앞으로 잰 각'을 Y 회전으로 바꿔 준다.
+          // 오른쪽은 -각, 왼쪽은 π+각. 이걸 빼먹으면 더듬이가 옆뒤를 가리킨다.
+          const spread = 1.0 + Math.sin(t) * 0.3;
+          segment.rotation.y = antenna.side > 0 ? -spread : Math.PI + spread;
+          segment.rotation.z = 0.45 + Math.sin(t * 0.8) * 0.25;
+        } else {
+          segment.rotation.y = Math.sin(t) * 0.22;
+          segment.rotation.z = -0.25 + Math.sin(t * 1.3) * 0.18;
+        }
+      });
     }
   }
 

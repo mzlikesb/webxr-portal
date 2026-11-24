@@ -593,11 +593,11 @@ scene.add(roachSun);
 // 나중에 이 그룹을 포털 안 복도 바닥이나 진짜 방 바닥에 맞추면, 바퀴 쪽
 // 코드는 한 줄도 바뀌지 않는다.
 const roachGround = new THREE.Group();
-roachGround.position.set(0, 1.2, -0.3); // 임시 — 미리보기 카메라 앞
+roachGround.position.set(0, 1.22, -0.17); // 임시 — 미리보기 카메라 앞
 scene.add(roachGround);
 
 // 걸음이 미끄러지는지 눈으로 보려면 바닥 무늬가 있어야 한다. 임시.
-const groundGrid = new THREE.GridHelper(0.5, 25, 0x335544, 0x223333);
+const groundGrid = new THREE.GridHelper(0.3, 30, 0x335544, 0x223333);
 roachGround.add(groundGrid);
 
 const roach = makeRoach();

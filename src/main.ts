@@ -594,22 +594,28 @@ const roachSun = new THREE.DirectionalLight(0xffffff, 2);
 roachSun.position.set(0.5, 1, 0.4);
 scene.add(roachSun);
 
-// 데스크톱 미리보기용 가짜 포털. 헤드셋 없이도 포털을 가로지르는 그림을
-// 확인할 수 있어야 한다. 세션에 들어가면 resetPortal이 지우고 다시 놓는다. 임시.
-portal.position.set(0, 1.2, -1.3);
-portal.quaternion.identity(); // 로컬 +Z가 법선이므로 그대로 카메라를 향한다
-portalPoint.copy(portal.position);
-placePortal();
-
 // 바퀴가 돌아다닐 '땅'. 포털 평면 위에 걸쳐 둔다 — 절반은 복도 안, 절반은
 // 방 안이라 바퀴가 돌아다니다 평면을 가로지른다.
 const roachGround = new THREE.Group();
-roachGround.position.copy(portal.position);
-// 미리보기에서만 통째로 키운다. 포털은 1.6m인데 바퀴는 4cm라, 둘을 한 화면에
-// 두면 바퀴가 점으로 보여 잘리는지 확인할 수가 없다. 클리핑은 월드 공간에서
-// 일어나므로 배율과 무관하게 같은 자리에서 잘린다. 임시.
-roachGround.scale.setScalar(4);
 scene.add(roachGround);
+
+const groundYaw = new THREE.Vector3();
+
+/**
+ * 바퀴가 걷는 평면을 포털에 맞춘다.
+ *
+ * 지금은 포털 중심을 지나는 수평면이다. 절반은 복도 안, 절반은 방 안이라
+ * 바퀴가 돌아다니다 포털 평면을 가로지른다 — 지금 확인하려는 게 그거다.
+ * 복도 바닥에서 걸어 나와 진짜 방 바닥으로 내려서는 건 아직 아니다.
+ */
+function alignRoachGroundToPortal(): void {
+  roachGround.position.copy(portal.position);
+  // 포털의 법선을 수평으로 눕혀 바라보는 방향만 남긴다. 평면은 수평이어야
+  // 하므로 기울기는 버리고 yaw만 쓴다.
+  groundYaw.set(0, 0, 1).applyQuaternion(portal.quaternion);
+  roachGround.rotation.set(0, Math.atan2(groundYaw.x, groundYaw.z), 0);
+  roachGround.updateMatrixWorld();
+}
 
 // 걸음이 미끄러지는지 눈으로 보려면 바닥 무늬가 있어야 한다. 임시.
 const groundGrid = new THREE.GridHelper(0.4, 40, 0x335544, 0x223333);
@@ -622,9 +628,20 @@ roachGround.add(roach.root);
 // 따라가는 '안쪽 복사본'이 옆에 생긴다.
 const roachCrossing = makePortalCrossing(roach.root, PORTAL_STENCIL_REF);
 
-// worldToLocal이 쓰는 역행렬은 행렬이 최신이어야 맞다. roachGround는 한 번
-// 놓고 움직이지 않으므로 여기서 한 번만 갱신해 두면 된다.
-roachGround.updateMatrixWorld();
+// 데스크톱 미리보기용 가짜 포털. 헤드셋 없이는 이 그림을 아예 볼 수 없다.
+// 세션에 들어가면 resetPortal이 지우고 네가 직접 놓게 한다. 임시.
+portal.position.set(0, 1.2, -1.3);
+portal.quaternion.identity(); // 로컬 +Z가 법선이라 그대로 카메라를 향한다
+portalPoint.copy(portal.position);
+placePortal();
+
+// 미리보기에서만 통째로 키운다. 포털은 1.6m인데 바퀴는 4cm라, 둘을 한 화면에
+// 두면 바퀴가 점으로 보여 잘리는지 확인할 수가 없다. 클리핑은 월드 공간에서
+// 일어나므로 배율과 무관하게 같은 자리에서 잘린다. 세션에 들어가면 1로
+// 되돌린다. 임시.
+const PREVIEW_ROACH_SCALE = 4;
+roachGround.scale.setScalar(PREVIEW_ROACH_SCALE);
+alignRoachGroundToPortal();
 
 const viewerPosition = new THREE.Vector3();
 
@@ -664,6 +681,11 @@ renderer.setAnimationLoop((time, frame) => {
 
   // 포털 평면을 바퀴 쪽에 알려 주고, 두 복사본의 자세를 맞춘다.
   if (portalPlaced) {
+    // 포털을 놓은 자리로 바퀴의 땅을 옮긴다. 세션 안에서는 실제 크기로.
+    roachGround.scale.setScalar(frame === undefined ? PREVIEW_ROACH_SCALE : 1);
+    groundGrid.visible = frame === undefined; // 격자는 미리보기용 보조선이다
+    alignRoachGroundToPortal();
+
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
     roachCrossing.setPlane(portal.position, portalFacing);
     roachCrossing.setDisabled(false);

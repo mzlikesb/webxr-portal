@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { makeRoach } from './roach';
+import { makePortalCrossing } from './portal-crossing';
 
 // ---------------------------------------------------------------------------
 // 1) 화면 밖으로 상태를 내보내는 두 경로
@@ -30,6 +31,10 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
+
+// 재질마다 다른 클리핑 평면을 쓰려면 켜야 한다. 포털 평면을 가로지르는
+// 물체를 앞뒤 반쪽으로 나눠 그리는 데 쓴다(portal-crossing.ts).
+renderer.localClippingEnabled = true;
 
 // 이 한 줄이 three.js의 렌더 경로를 XR 모드로 바꾼다.
 // 세션이 붙으면 three.js가 눈(view)별로 카메라를 만들고 두 번 그린다.
@@ -589,11 +594,21 @@ const roachSun = new THREE.DirectionalLight(0xffffff, 2);
 roachSun.position.set(0.5, 1, 0.4);
 scene.add(roachSun);
 
-// 바퀴가 돌아다닐 '땅'. 지금은 미리보기 카메라 앞에 떠 있는 가상의 바닥이다.
-// 나중에 이 그룹을 포털 안 복도 바닥이나 진짜 방 바닥에 맞추면, 바퀴 쪽
-// 코드는 한 줄도 바뀌지 않는다.
+// 데스크톱 미리보기용 가짜 포털. 헤드셋 없이도 포털을 가로지르는 그림을
+// 확인할 수 있어야 한다. 세션에 들어가면 resetPortal이 지우고 다시 놓는다. 임시.
+portal.position.set(0, 1.2, -1.3);
+portal.quaternion.identity(); // 로컬 +Z가 법선이므로 그대로 카메라를 향한다
+portalPoint.copy(portal.position);
+placePortal();
+
+// 바퀴가 돌아다닐 '땅'. 포털 평면 위에 걸쳐 둔다 — 절반은 복도 안, 절반은
+// 방 안이라 바퀴가 돌아다니다 평면을 가로지른다.
 const roachGround = new THREE.Group();
-roachGround.position.set(0, 1.2, -0.32); // 임시 — 활동 반경이 프레임에 들어오는 거리
+roachGround.position.copy(portal.position);
+// 미리보기에서만 통째로 키운다. 포털은 1.6m인데 바퀴는 4cm라, 둘을 한 화면에
+// 두면 바퀴가 점으로 보여 잘리는지 확인할 수가 없다. 클리핑은 월드 공간에서
+// 일어나므로 배율과 무관하게 같은 자리에서 잘린다. 임시.
+roachGround.scale.setScalar(4);
 scene.add(roachGround);
 
 // 걸음이 미끄러지는지 눈으로 보려면 바닥 무늬가 있어야 한다. 임시.
@@ -602,6 +617,10 @@ roachGround.add(groundGrid);
 
 const roach = makeRoach();
 roachGround.add(roach.root);
+
+// 바퀴를 두 벌로 나눈다. roach.root는 '바깥 복사본'이 되고, 같은 자세를
+// 따라가는 '안쪽 복사본'이 옆에 생긴다.
+const roachCrossing = makePortalCrossing(roach.root, PORTAL_STENCIL_REF);
 
 // worldToLocal이 쓰는 역행렬은 행렬이 최신이어야 맞다. roachGround는 한 번
 // 놓고 움직이지 않으므로 여기서 한 번만 갱신해 두면 된다.
@@ -642,6 +661,16 @@ renderer.setAnimationLoop((time, frame) => {
   roachGround.worldToLocal(viewerPosition);
 
   roach.update(dt, speedSlider === null ? 1 : Number(speedSlider.value), viewerPosition);
+
+  // 포털 평면을 바퀴 쪽에 알려 주고, 두 복사본의 자세를 맞춘다.
+  if (portalPlaced) {
+    portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
+    roachCrossing.setPlane(portal.position, portalFacing);
+    roachCrossing.setDisabled(false);
+  } else {
+    roachCrossing.setDisabled(true);
+  }
+  roachCrossing.sync();
 
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();
@@ -692,6 +721,9 @@ async function startSession(): Promise<void> {
   // 어느 손/컨트롤러인지 신경 쓸 필요가 없다. three.js의 renderer.xr.getController(i)
   // 로도 같은 이벤트를 받을 수 있지만, 그건 컨트롤러를 씬에 그릴 때 쓰는 것이다.
   session.addEventListener('select', placePortal);
+
+  // 미리보기용으로 놓아 둔 가짜 포털을 지우고, 이 세션에서 다시 고르게 한다.
+  resetPortal();
 
   log('세션 시작');
   // ①단계의 실제 목적: Quest 3가 뭘 허락했는지 눈으로 확인하는 것.

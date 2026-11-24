@@ -13,8 +13,14 @@ import * as THREE from 'three';
 // 매 프레임 몸 공간으로 가져와서 관절을 역산한다.
 // ---------------------------------------------------------------------------
 
-/** 실제 몸길이(m). 집바퀴 성충이 이 정도. */
-export const ROACH_LENGTH = 0.045;
+/**
+ * 실제 몸길이(m).
+ *
+ * 이질바퀴(Periplaneta americana) 성충이 34~53mm. 가운데쯤을 잡았다.
+ * 아래 모형의 비율도 전부 이 종의 실측에 맞췄다 — 폭/길이 0.375,
+ * 높이/길이 0.175, 더듬이는 몸길이의 1.2~1.5배.
+ */
+export const ROACH_LENGTH = 0.04;
 
 /** 몸통에서 고관절까지의 높이(몸 공간). 곧 몸이 바닥에서 뜬 높이다. */
 const HIP_Y = 0.05;
@@ -51,8 +57,8 @@ interface LegSpec {
 
 const LEG_SPECS: LegSpec[] = [
   { z: 0.3, spread: 0.82, femur: 0.28, tibia: 0.3 },
-  { z: 0.06, spread: -0.33, femur: 0.34, tibia: 0.4 },
-  { z: -0.2, spread: -0.68, femur: 0.44, tibia: 0.56 },
+  { z: 0.06, spread: -0.33, femur: 0.31, tibia: 0.36 },
+  { z: -0.2, spread: -0.68, femur: 0.4, tibia: 0.5 },
 ];
 
 interface Leg {
@@ -177,7 +183,10 @@ function limbGeometry(length: number, rootRadius: number, tipRadius: number): TH
  * 전체가 한 덩어리로 움직이지 않게 한다.
  */
 function buildAntenna(material: THREE.Material, side: number): Antenna {
-  const lengths = [0.22, 0.18, 0.15];
+  // 합이 1.3 — 실제로 더듬이는 몸보다 길다. 처음엔 0.55로 만들었는데
+  // 몸길이의 절반밖에 안 됐고, 그래서 바퀴벌레로 안 보였다.
+  // 마디를 넷으로 늘린 건 길어진 만큼 휘는 곡선이 필요해서다.
+  const lengths = [0.4, 0.35, 0.3, 0.25];
   const segments: THREE.Group[] = [];
 
   let parent: THREE.Group | null = null;
@@ -185,11 +194,11 @@ function buildAntenna(material: THREE.Material, side: number): Antenna {
   lengths.forEach((length, i) => {
     const segment = new THREE.Group();
     segment.rotation.order = 'YXZ';
-    segment.add(new THREE.Mesh(limbGeometry(length, 0.011 - i * 0.002, 0.008 - i * 0.002), material));
+    segment.add(new THREE.Mesh(limbGeometry(length, 0.009 - i * 0.0015, 0.0075 - i * 0.0015), material));
 
     if (parent === null) {
       // 머리 앞쪽에서 비스듬히 위·바깥으로 나간다.
-      segment.position.set(side * 0.05, 0.12, 0.52);
+      segment.position.set(side * 0.045, 0.105, 0.5);
     } else {
       segment.position.x = lengths[i - 1]; // 앞 마디의 끝
       parent.add(segment);
@@ -207,19 +216,24 @@ function buildBody(material: THREE.Material): THREE.Group {
 
   // 바퀴벌레는 아주 납작하다. 그리고 몸 아랫면이 바닥(y=0)을 파고들면 안 된다.
   // 각 덩어리의 '중심 y − 세로 반지름'이 0보다 커야 한다.
+  // 배 + 날개. 몸의 대부분을 차지하는 납작한 타원.
+  // 폭 0.41 / 전체 길이 1.03 ≈ 0.40, 실측 0.375에 가깝다.
   const abdomen = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), material);
-  abdomen.scale.set(0.72, 0.26, 1.25); // 세로 반지름 0.078
-  abdomen.position.set(0, 0.105, -0.1); // 아랫면 0.027
+  abdomen.scale.set(0.68, 0.26, 1.3); // 폭 0.41, 세로 반지름 0.078, 길이 0.78
+  abdomen.position.set(0, 0.105, -0.12); // 아랫면 0.027, 뒤끝 -0.51
   body.add(abdomen);
 
+  // 앞가슴판. 머리를 덮는 방패다. 실측은 '폭이 길이의 2.5배'라
+  // 앞뒤로 짧고 좌우로 넓다. 바퀴벌레를 위에서 봤을 때의 인상이 여기서 나온다.
   const pronotum = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 12), material);
-  pronotum.scale.set(1, 0.34, 0.95); // 세로 반지름 0.075
-  pronotum.position.set(0, 0.115, 0.28); // 아랫면 0.040
+  pronotum.scale.set(1, 0.34, 0.4); // 폭 0.44, 길이 0.176 → 2.5배
+  pronotum.position.set(0, 0.115, 0.3);
   body.add(pronotum);
 
+  // 머리. 앞가슴판 아래로 거의 숨는다.
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 10), material);
-  head.scale.set(1, 0.62, 0.85); // 세로 반지름 0.068
-  head.position.set(0, 0.095, 0.46); // 아랫면 0.027
+  head.scale.set(0.85, 0.55, 0.7);
+  head.position.set(0, 0.09, 0.44);
   body.add(head);
 
   return body;
@@ -316,7 +330,10 @@ export function makeRoach(): Roach {
 
   // ── 상태 ──
   let heading = Math.random() * Math.PI * 2;
+  /** 지금 내고 있는 속도(m/s). */
   let speed = 0;
+  /** 돌아다니기가 정한 가고 싶은 속도. speed가 이걸 쫓아간다. */
+  let targetSpeed = 0;
   let turnRate = 0;
   let timer = 0;
   let phase = Math.random() * Math.PI * 2;
@@ -353,19 +370,26 @@ export function makeRoach(): Roach {
     timer -= dt;
 
     if (timer <= 0) {
-      if (speed > 0) {
-        speed = 0; // 멈춤
+      if (targetSpeed > 0) {
+        targetSpeed = 0; // 멈춤
         timer = rand(0.4, 1.8);
       } else if (Math.random() < 0.18) {
-        speed = rand(0.18, MAX_SPEED); // 가끔 확 달린다
+        targetSpeed = rand(0.18, MAX_SPEED); // 가끔 확 달린다
         timer = rand(0.25, 0.5);
         turnRate = rand(-0.5, 0.5); // 달릴 때는 거의 직진
       } else {
-        speed = rand(0.03, 0.08); // 평소엔 느릿느릿
+        targetSpeed = rand(0.03, 0.08); // 평소엔 느릿느릿
         timer = rand(0.6, 2.2);
         turnRate = rand(-1.2, 1.2);
       }
     }
+
+    // 목표 속도를 실제 속도가 쫓아간다. 감쇠율이 높아서 체감은 거의 즉발이지만,
+    // 불연속이 사라지는 것이 중요하다. 전에는 속도가 0에서 최대로 한 프레임에
+    // 튀는 바람에, 땅에 박힌 발이 다음 걸음 전에 쭉 끌려가 다리가 늘어났다.
+    // 멈출 때도 마찬가지로, 이 감쇠가 있어야 걸음이 끝까지 마무리된다.
+    speed += (targetSpeed - speed) * Math.min(1, dt * 14);
+    if (Math.abs(speed - targetSpeed) < 0.002) speed = targetSpeed;
 
     heading += turnRate * dt;
 
@@ -388,13 +412,22 @@ export function makeRoach(): Roach {
 
     const speedNorm = clamp((speed * speedScale) / MAX_SPEED, 0, 1);
 
-    // 빠를수록 자주 젓는다. 6은 멈춰 있을 때도 미세하게 떠는 기본 박자.
-    const phaseRate = 6 + speedNorm * 26;
+    // ── 걸음의 박자 ──
+    //
+    // 속도에 비례할 뿐 바닥값이 없다. 멈추면 위상도 멈추고, 그래서 다리도
+    // 멈춘다. 전에는 바닥값이 있어서 가만히 선 채로 초당 한 번씩 발을 들었다 —
+    // 제자리걸음하는 벌레는 없다.
+    //
+    // 다만 발이 공중에 있는 동안 위상이 멈추면 그 발은 영영 떠 있게 된다.
+    // 그래서 누군가 발을 떼고 있는 동안에는 최소 박자를 보장해서, 하던 걸음을
+    // 마치고 모두 땅에 닿은 뒤에 멎게 한다.
+    const anySwinging = legs.some((leg) => leg.swinging);
+    const phaseRate = Math.max(speedNorm * 30, anySwinging ? 9 : 0);
     phase += dt * phaseRate;
 
     // 한 번 딛는 동안 몸이 나아가는 거리. 반주기가 디딤, 반주기가 뗌이다.
-    const stance = Math.PI / phaseRate;
-    const stride = speed * stance;
+    // 멈춰 있으면 phaseRate가 0이라 나눌 수 없다. 그때는 보폭도 0이다.
+    const stride = phaseRate > 0 ? (speed * Math.PI) / phaseRate : 0;
 
     for (const leg of legs) {
       // sin이 양수인 반주기에 발을 뗀다. 삼각대마다 부호가 반대라
@@ -461,7 +494,8 @@ export function makeRoach(): Roach {
     // ── 몸통 흔들림 ──
     // 좌우 기울기는 걸음과 같은 주기다. 지금 딛고 있는 삼각대 쪽으로 몸이
     // 쏠린다. 위아래는 두 배 주기 — 한 걸음에 두 번, 삼각대가 번갈아 밀어내므로.
-    body.position.y = Math.sin(phase * 2) * 0.012 * speedNorm;
+    // 쉴 때는 몸을 바닥 쪽으로 낮춘다. 바퀴벌레는 멈추면 납작 엎드린다.
+    body.position.y = Math.sin(phase * 2) * 0.012 * speedNorm - (1 - speedNorm) * 0.012;
     body.rotation.z = Math.sin(phase) * 0.05 * speedNorm;
     // 달릴 때 앞을 살짝 숙인다.
     body.rotation.x = speedNorm * 0.06;

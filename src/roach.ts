@@ -25,8 +25,15 @@ export const ROACH_LENGTH = 0.04;
 /** 몸통에서 고관절까지의 높이(몸 공간). 곧 몸이 바닥에서 뜬 높이다. */
 const HIP_Y = 0.05;
 
-/** 쉴 때 넓적다리를 위로 든 각. 무릎이 몸통보다 솟은 모양을 만든다. */
-const FEMUR_PITCH = 0.3;
+/**
+ * 쉴 때 넓적다리를 위로 든 각. 무릎이 몸통보다 솟은 모양을 만든다.
+ *
+ * 이 값이 작으면 쉬는 자세에서 다리가 거의 쭉 뻗는다. 0.3일 때 뒷다리는
+ * 이미 95% 뻗은 상태였고, 그러면 디디는 동안 발을 뒤로 보낼 여유가 없다.
+ * IK가 '못 닿음'으로 잘라 버려서 발이 땅에 박힌 자리를 못 따라가고, 보기에는
+ * 뒷발이 질질 끌린다. 굽혀 두면 그만큼 가동 범위가 생긴다.
+ */
+const FEMUR_PITCH = 0.9;
 
 /** 발을 들어 올리는 높이(몸 공간). */
 const STEP_HEIGHT = 0.1;
@@ -35,7 +42,16 @@ const STEP_HEIGHT = 0.1;
 const MAX_SPEED = 0.26;
 
 /** 몸 중심에서 발까지의 대략적인 거리(m). 회전을 걸음으로 환산할 때 쓴다. */
-const FOOT_RADIUS = 0.03;
+const FOOT_RADIUS = 0.022;
+
+/**
+ * 한 걸음에 나아가는 거리(바퀴 단위). 느릴 땐 종종걸음, 빠를 땐 성큼.
+ *
+ * 상한은 다리가 닿는 범위에서 나온 값이다. 이보다 크게 잡으면 디딤 끝에서
+ * 발이 다리 길이를 넘어가고, IK가 자르면서 발이 끌린다.
+ */
+const MIN_STRIDE = 0.12;
+const MAX_STRIDE = 0.34;
 
 /** 이 거리 안에서 위협이 다가오면 놀란다(m). */
 const SCARE_RADIUS = 0.35;
@@ -695,12 +711,23 @@ export function makeRoach(): Roach {
     // 다만 발이 공중에 있는 동안 위상이 멈추면 그 발은 영영 떠 있게 된다.
     // 그래서 누군가 발을 떼고 있는 동안에는 최소 박자를 보장해서, 하던 걸음을
     // 마치고 모두 땅에 닿은 뒤에 멎게 한다.
+    // 걸음 주기를 '보폭'에서 거꾸로 구한다. 전에는 주기를 속도에 비례시켰는데,
+    // 그러면 보폭 = 속도 × 반주기 가 속도와 무관한 상수가 되어 버린다.
+    // 느리게 걷든 달리든 늘 같은 폭으로 성큼거렸고, 그 폭이 다리 범위를
+    // 넘어서 발이 끌렸다. 보폭을 먼저 정하고 주기를 맞추면 둘 다 해결된다.
+    const strideUnits = MIN_STRIDE + (MAX_STRIDE - MIN_STRIDE) * speedNorm;
     const anySwinging = legs.some((leg) => leg.swinging);
-    const phaseRate = Math.max(speedNorm * 30, anySwinging ? 9 : 0);
+    const phaseRate =
+      gaitSpeed > 0.001
+        ? (Math.PI * gaitSpeed) / (strideUnits * ROACH_LENGTH)
+        : anySwinging
+          ? 9
+          : 0;
     phase += dt * phaseRate;
 
-    // 한 번 딛는 동안 몸이 나아가는 거리. 반주기가 디딤, 반주기가 뗌이다.
-    // 멈춰 있으면 phaseRate가 0이라 나눌 수 없다. 그때는 보폭도 0이다.
+    // 발을 앞으로 내놓을 거리. 주기는 회전까지 포함한 gaitSpeed로 정했지만,
+    // 발을 '앞으로' 보내는 건 전진 성분뿐이다. 제자리에서 돌 때 발이 앞으로
+    // 나가면 안 된다.
     const stride = phaseRate > 0 ? (speed * Math.PI) / phaseRate : 0;
 
     // 그루밍 동작의 당김 주기. 0에서 1 사이를 오간다.

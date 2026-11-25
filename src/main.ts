@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { makeRoach } from './roach';
+import type { Roach } from './roach';
 import { makePortalCrossing } from './portal-crossing';
+import type { PortalCrossing } from './portal-crossing';
 import { makeWalkSurface, orientSurface, transferIfCrossed } from './walk-surface';
 import type { WalkSurface } from './walk-surface';
 
@@ -649,15 +651,27 @@ function beginLurking(): void {
   corridorFloor.drift = null; // 목적 없이 서성인다
 }
 
-/** 바퀴를 복도 깊은 곳으로 되돌린다. 세션을 새로 시작할 때마다 부른다. */
-function resetRoach(): void {
+/** 바퀴들을 복도 깊은 곳으로 되돌린다. 세션을 새로 시작할 때마다 부른다. */
+function resetRoaches(): void {
   beginLurking();
-  currentSurface = corridorFloor;
-  roach.placeOn(corridorFloor.node, 0, LURK_CENTER_Z, 0);
-  roach.setExitZ(corridorFloor.exitZ);
-  roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
-  roach.setDrift(corridorFloor.drift);
-  roach.setBackLimit(corridorFloor.backLimitZ);
+  units.forEach((unit, i) => {
+    unit.surface = corridorFloor;
+    unit.roach.placeOn(
+      corridorFloor.node,
+      (i - (units.length - 1) / 2) * 0.09,
+      LURK_CENTER_Z - i * 0.06,
+      0,
+    );
+    applySurface(unit);
+  });
+}
+
+/** 지금 올라서 있는 면의 설정을 바퀴에게 적용한다. */
+function applySurface(unit: RoachUnit): void {
+  unit.roach.setExitZ(unit.surface.exitZ);
+  unit.roach.setBounds(unit.surface.boundCenterZ, unit.surface.boundRadius);
+  unit.roach.setDrift(unit.surface.drift);
+  unit.roach.setBackLimit(unit.surface.backLimitZ);
 }
 
 function beginEmerging(): void {
@@ -666,9 +680,10 @@ function beginEmerging(): void {
   corridorFloor.boundCenterZ = -0.12;
   corridorFloor.boundRadius = 0.2;
   corridorFloor.drift = 0; // 구멍 밖으로
-  // 면의 설정을 바꿨으니 지금 그 면에 서 있는 바퀴에게도 알려 줘야 한다.
-  roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
-  roach.setDrift(corridorFloor.drift);
+  // 면의 설정을 바꿨으니 지금 그 면에 서 있는 바퀴들에게도 알려 줘야 한다.
+  for (const unit of units) {
+    if (unit.surface === corridorFloor) applySurface(unit);
+  }
   log('바퀴가 나오기 시작했다');
 }
 
@@ -733,20 +748,46 @@ const surfaceGrids = [
   return grid;
 });
 
-const roach = makeRoach();
+/**
+ * 바퀴 한 마리와 그에 딸린 것들.
+ *
+ * 한 마리였을 때는 전부 따로 놓인 변수였는데, 여럿이 되니 같이 움직여야 하는
+ * 것들이 분명해졌다 — 몸, 포털 경계용 복사본, 지금 올라서 있는 면.
+ */
+interface RoachUnit {
+  roach: Roach;
+  crossing: PortalCrossing;
+  surface: WalkSurface;
+}
 
-/** 바퀴가 지금 올라서 있는 면. */
-let currentSurface: WalkSurface = corridorFloor;
-roach.placeOn(corridorFloor.node, 0, LURK_CENTER_Z, 0); // 복도 깊은 곳에서 시작
-roach.setExitZ(corridorFloor.exitZ);
-roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
-// 복도 바닥에서는 구멍 밖(+Z)으로 나가려 한다. 이 작품에서 바퀴는 포털에서
-// 나오는 존재다.
-roach.setDrift(corridorFloor.drift);
+/** 몇 마리나 둘지. 드로우콜을 재 보려고 올려 둔 값이기도 하다. */
+const ROACH_COUNT = 4;
 
-// 바퀴를 두 벌로 나눈다. roach.root는 '바깥 복사본'이 되고, 같은 자세를
-// 따라가는 '안쪽 복사본'이 옆에 생긴다.
-const roachCrossing = makePortalCrossing(roach.root, PORTAL_STENCIL_REF);
+const units: RoachUnit[] = [];
+
+for (let i = 0; i < ROACH_COUNT; i += 1) {
+  const roach = makeRoach();
+
+  // 복도 깊은 곳에 흩어 둔다. 한 점에 겹쳐 두면 처음 몇 초가 어색하다.
+  roach.placeOn(
+    corridorFloor.node,
+    (i - (ROACH_COUNT - 1) / 2) * 0.09,
+    LURK_CENTER_Z - i * 0.06,
+    0,
+  );
+  roach.setExitZ(corridorFloor.exitZ);
+  roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
+  roach.setDrift(corridorFloor.drift);
+  roach.setBackLimit(corridorFloor.backLimitZ);
+
+  // 바퀴를 두 벌로 나눈다. roach.root는 '바깥 복사본'이 되고, 같은 자세를
+  // 따라가는 '안쪽 복사본'이 옆에 생긴다.
+  units.push({
+    roach,
+    crossing: makePortalCrossing(roach.root, PORTAL_STENCIL_REF),
+    surface: corridorFloor,
+  });
+}
 
 // 데스크톱 미리보기용 가짜 포털. 헤드셋 없이는 이 그림을 아예 볼 수 없다.
 // 세션에 들어가면 resetPortal이 지우고 네가 직접 놓게 한다. 임시.
@@ -763,6 +804,8 @@ camera.position.set(0, 0.75, -0.35);
 camera.lookAt(0, 0.22, -1.3);
 
 const viewerPosition = new THREE.Vector3();
+/** 위 값을 면 로컬로 옮긴 것. 마리마다 면이 달라 매번 다시 만든다. */
+const viewerLocal = new THREE.Vector3();
 
 // 데스크톱에서 놀라는 걸 확인하려면 누를 데가 있어야 한다. 미리보기 카메라는
 // 가만히 있어서 '다가옴'이 영영 일어나지 않는다. 임시.
@@ -770,7 +813,7 @@ renderer.domElement.addEventListener('pointerdown', () => {
   // 미리보기 카메라는 움직이지 않아서 '다가옴'이 일어나지 않는다.
   // 첫 클릭은 바퀴를 불러내고, 그 뒤로는 놀래킨다.
   if (!hasEmerged) beginEmerging();
-  else roach.scare(viewerPosition.x, viewerPosition.z);
+  else for (const unit of units) unit.roach.scare(viewerPosition.x, viewerPosition.z);
 });
 
 /** 걸음새를 눈으로 맞추려고 둔 임시 슬라이더. 바퀴가 스스로 고른 속도에 곱한다. */
@@ -785,6 +828,7 @@ const speedSlider = document.querySelector('#speed') as HTMLInputElement | null;
 // setAnimationLoop의 콜백은 (시간, XRFrame)을 받는다. frame은 XR 세션 중에만
 // 들어오고, 세션 밖에서는 undefined다.
 let lastFrameTime = 0;
+let costTimer = 0;
 
 renderer.setAnimationLoop((time, frame) => {
   // setAnimationLoop은 밀리초 타임스탬프를 준다. 첫 프레임은 이전 값이 없어
@@ -799,21 +843,22 @@ renderer.setAnimationLoop((time, frame) => {
   viewer.getWorldPosition(viewerPosition);
 
   // 아직 복도에 있고 사람이 다가왔으면, 이제 나온다.
-  if (!hasEmerged && portalPlaced && currentSurface === corridorFloor) {
+  if (!hasEmerged && portalPlaced) {
     if (viewerPosition.distanceTo(portal.position) < EMERGE_DISTANCE) beginEmerging();
   }
 
-  currentSurface.node.worldToLocal(viewerPosition);
+  const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);
 
-  roach.update(dt, speedSlider === null ? 1 : Number(speedSlider.value), viewerPosition);
+  for (const unit of units) {
+    // 시점 위치는 마리마다 올라서 있는 면이 달라서 각자 변환해야 한다.
+    viewerLocal.copy(viewerPosition);
+    unit.surface.node.worldToLocal(viewerLocal);
 
-  // 모서리를 넘었으면 다음 면으로 옮긴다.
-  const nextSurface = transferIfCrossed(roach, currentSurface);
-  if (nextSurface !== currentSurface) {
-    currentSurface = nextSurface;
-    const name =
-      currentSurface === wallFace ? '벽면' : currentSurface === roomFloor ? '방 바닥' : '복도 바닥';
-    log(`모서리를 넘었다 → ${name}`);
+    unit.roach.update(dt, speedScale, viewerLocal);
+
+    // 모서리를 넘었으면 다음 면으로 옮긴다.
+    const next = transferIfCrossed(unit.roach, unit.surface);
+    if (next !== unit.surface) unit.surface = next;
   }
 
   // 포털 평면을 바퀴 쪽에 알려 주고, 두 복사본의 자세를 맞춘다.
@@ -823,12 +868,14 @@ renderer.setAnimationLoop((time, frame) => {
     for (const grid of surfaceGrids) grid.visible = frame === undefined;
 
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
-    roachCrossing.setPlane(portal.position, portalFacing);
-    roachCrossing.setDisabled(false);
+    for (const unit of units) {
+      unit.crossing.setPlane(portal.position, portalFacing);
+      unit.crossing.setDisabled(false);
+    }
   } else {
-    roachCrossing.setDisabled(true);
+    for (const unit of units) unit.crossing.setDisabled(true);
   }
-  roachCrossing.sync();
+  for (const unit of units) unit.crossing.sync();
 
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();
@@ -843,6 +890,15 @@ renderer.setAnimationLoop((time, frame) => {
   }
 
   renderer.render(scene, camera);
+
+  // 렌더 비용을 눈으로 보려고 가끔 찍는다. 세션 안에서는 2D UI가 안 보이므로
+  // 콘솔로도 나가야 의미가 있다(log가 양쪽에 쓴다).
+  costTimer += dt;
+  if (costTimer > 3) {
+    costTimer = 0;
+    const info = renderer.info.render;
+    log(`바퀴 ${units.length}마리 · 드로우콜 ${info.calls} · 삼각형 ${info.triangles}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -883,7 +939,7 @@ async function startSession(): Promise<void> {
   // 미리보기용으로 놓아 둔 가짜 포털을 지우고, 이 세션에서 다시 고르게 한다.
   resetPortal();
   // 바퀴도 복도 안으로 되돌린다. 세션마다 처음부터 시작해야 한다.
-  resetRoach();
+  resetRoaches();
 
   log('세션 시작');
   // ①단계의 실제 목적: Quest 3가 뭘 허락했는지 눈으로 확인하는 것.

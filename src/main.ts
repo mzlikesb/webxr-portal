@@ -652,7 +652,9 @@ roomFloor.boundRadius = 0.4;
 //
 // 구멍으로 안쪽을 들여다보면 뭔가 움직이는 게 먼저 보이고, 그 다음에 나온다.
 const LURK_CENTER_Z = -0.55; // 구멍에서 이만큼 안쪽을 서성인다
-const LURK_RADIUS = 0.3;
+// 복도 안쪽 반폭이 PORTAL_WIDTH/2 + 0.1이다. 여덟 마리가 한 원에 몰리지
+// 않도록 그 안에서 최대한 넓게 잡는다.
+const LURK_RADIUS = 0.35;
 /** 보는 사람이 포털에 이만큼 가까워지면 나오기 시작한다(m). */
 const EMERGE_DISTANCE = 1.0;
 
@@ -784,6 +786,9 @@ interface RoachUnit {
 /** 몇 마리나 둘지. 드로우콜을 재 보려고 올려 둔 값이기도 하다. */
 const ROACH_COUNT = 8;
 
+/** 이 거리 안에 다른 바퀴가 있으면 서로 비킨다(m). 몸길이의 두 배쯤. */
+const SEPARATION = 0.08;
+
 const units: RoachUnit[] = [];
 
 // 부품을 조합별로 묶어 그린다. 등록한 메시는 숨겨지고, 모양은 인스턴스가 낸다.
@@ -871,6 +876,25 @@ renderer.setAnimationLoop((time, frame) => {
   }
 
   const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);
+
+  // ── 서로 비키기 ──
+  //
+  // 같은 면 위에 있는 짝만 본다. 벽에 붙은 놈과 바닥에 있는 놈은 로컬 좌표가
+  // 같아도 월드에서는 떨어져 있다. 여덟 마리면 짝이 스물여덟이라 그냥 다 센다.
+  for (let i = 0; i < units.length; i += 1) {
+    for (let j = i + 1; j < units.length; j += 1) {
+      const a = units[i];
+      const b = units[j];
+      if (a.surface !== b.surface) continue;
+
+      const dx = a.roach.root.position.x - b.roach.root.position.x;
+      const dz = a.roach.root.position.z - b.roach.root.position.z;
+      if (dx * dx + dz * dz > SEPARATION * SEPARATION) continue;
+
+      a.roach.avoid(b.roach.root.position.x, b.roach.root.position.z);
+      b.roach.avoid(a.roach.root.position.x, a.roach.root.position.z);
+    }
+  }
 
   for (const unit of units) {
     // 시점 위치는 마리마다 올라서 있는 면이 달라서 각자 변환해야 한다.

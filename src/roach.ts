@@ -168,6 +168,11 @@ export interface Roach {
   /** 밖에서 강제로 놀래킨다. 위치는 땅 공간. */
   scare(x: number, z: number): void;
   /**
+   * 이 자리를 피해 간다. 같은 면 위의 다른 바퀴를 넘겨주면 서로 비킨다.
+   * 한 프레임짜리 밀침이라 매 프레임 다시 불러야 한다.
+   */
+  avoid(x: number, z: number): void;
+  /**
    * 다른 면으로 옮겨 놓는다. 모서리를 넘을 때 쓴다.
    * 위치와 방향은 모두 새 면의 로컬 기준이고, 발은 거기서 새로 디딘다.
    */
@@ -600,6 +605,9 @@ export function makeRoach(): Roach {
   let antT = Math.random() * Math.PI * 2;
   /** 직전 프레임의 속도. 가속도를 재서 몸을 숙이는 데 쓴다. */
   let prevSpeed = 0;
+  /** 이번 프레임에 비켜야 할 방향의 합. 매 프레임 비운다. */
+  let avoidX = 0;
+  let avoidZ = 0;
 
   const angles: JointAngles = { femurAngle: 0, kneeAngle: 0 };
 
@@ -752,6 +760,20 @@ export function makeRoach(): Roach {
     }
 
     heading += turnRate * dt;
+
+    // ── 서로 비키기 ──
+    //
+    // 가까운 이웃이 있으면 그 반대쪽으로 튼다. 겹치지 않게 하는 것이 일차
+    // 목적이지만, 효과는 그것만이 아니다. 여럿이 같은 경계를 따라 돌면 한
+    // 궤도에 줄줄이 늘어서는데, 서로 밀면 그 줄이 저절로 흐트러진다.
+    if (avoidX !== 0 || avoidZ !== 0) {
+      const want = Math.atan2(avoidX, avoidZ);
+      // 피하는 힘이 셀수록(= 가까울수록) 많이 튼다.
+      const urgency = Math.min(1, Math.hypot(avoidX, avoidZ));
+      heading += wrapAngle(want - heading) * Math.min(1, dt * 6 * urgency);
+      avoidX = 0;
+      avoidZ = 0;
+    }
 
     // 가고 싶은 방향이 있으면 아주 천천히 그쪽으로 끌린다.
     //
@@ -1074,6 +1096,20 @@ export function makeRoach(): Roach {
     root,
     update,
     scare,
+    avoid(x, z) {
+      const dx = root.position.x - x;
+      const dz = root.position.z - z;
+      const distance = Math.hypot(dx, dz);
+      if (distance < 1e-5) {
+        // 정확히 겹쳐 있으면 방향이 없다. 아무 쪽으로나 민다.
+        avoidX += 1;
+        return;
+      }
+      // 가까울수록 세게. 몸길이쯤 떨어지면 거의 0이 된다.
+      const push = Math.max(0, 1 - distance / (ROACH_LENGTH * 1.6));
+      avoidX += (dx / distance) * push;
+      avoidZ += (dz / distance) * push;
+    },
     placeOn,
     getHeading() {
       return heading;

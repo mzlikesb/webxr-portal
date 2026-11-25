@@ -239,8 +239,8 @@ function reportPlanes(detectedPlanes: XRPlaneSet): void {
 //    둔다. 벽이 안 잡히면 눈앞 1.5m에 세운다(평면 감지가 아예 안 되는 기기의
 //    대체 경로도 겸한다). 트리거를 당기면 그 자리에 확정된다.
 // ---------------------------------------------------------------------------
-const PORTAL_WIDTH = 0.9;
-const PORTAL_HEIGHT = 1.6;
+const PORTAL_WIDTH = 0.6;
+const PORTAL_HEIGHT = 0.95;
 /** 벽을 못 찾았을 때 포털을 띄울 거리. */
 const PORTAL_FALLBACK_DISTANCE = 1.5;
 
@@ -617,9 +617,17 @@ const corridorFloor = makeWalkSurface(scene);
 const wallFace = makeWalkSurface(scene);
 const roomFloor = makeWalkSurface(scene);
 
+// 모서리는 양방향이다. 나올 때 지나온 길을 그대로 되짚어 올라갈 수 있다.
 corridorFloor.next = wallFace;
 corridorFloor.exitZ = 0; // 아래턱을 넘으면 벽면으로
+wallFace.prev = corridorFloor;
+// 벽면에서 아래턱 위로 올라가는 건 구멍 폭 안에서만 된다. 그 밖은 벽이다.
+wallFace.backHalfWidth = PORTAL_WIDTH / 2;
+
 wallFace.next = roomFloor; // 벽을 다 내려오면 방 바닥으로 (높이는 아래에서)
+roomFloor.prev = wallFace;
+// 벽은 좌우로 이어지므로 어디서든 타고 오를 수 있다.
+roomFloor.backHalfWidth = 2;
 
 // 세 면 모두 +Z가 '계속 가는 쪽'이다.
 // 복도에서는 구멍 밖, 벽에서는 아래로, 바닥에서는 벽에서 멀어지는 쪽.
@@ -677,7 +685,7 @@ function applySurface(unit: RoachUnit): void {
   unit.roach.setExitZ(unit.surface.exitZ);
   unit.roach.setBounds(unit.surface.boundCenterZ, unit.surface.boundRadius);
   unit.roach.setDrift(unit.surface.drift);
-  unit.roach.setBackLimit(unit.surface.backLimitZ);
+  unit.roach.setBackLimit(unit.surface.backLimitZ, unit.surface.backHalfWidth);
 }
 
 function beginEmerging(): void {
@@ -729,8 +737,8 @@ function layOutSurfaces(): void {
   wallFace.exitZ = dropHeight > 0.05 ? dropHeight : null;
   wallFace.boundCenterZ = dropHeight / 2;
   wallFace.boundRadius = dropHeight / 2 + 0.12;
-  // 아래턱 위는 벽이 아니라 구멍이다. 넘어가면 바퀴가 구멍 앞 허공을 걷는다.
-  // 원만으로 막으려면 아래턱 근처에서 활동 폭이 0이 되므로, 선으로 따로 막는다.
+  // 아래턱 위는 벽이 아니라 구멍이다. 구멍 폭 밖에서 넘어가면 허공을 걷게 되니
+  // 선으로 막고, 폭 안쪽은 열어 둔다 — 거기로는 복도로 되돌아 들어간다.
   wallFace.backLimitZ = 0;
 
   for (const surface of [corridorFloor, wallFace, roomFloor]) {
@@ -790,7 +798,7 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
   roach.setExitZ(corridorFloor.exitZ);
   roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
   roach.setDrift(corridorFloor.drift);
-  roach.setBackLimit(corridorFloor.backLimitZ);
+  roach.setBackLimit(corridorFloor.backLimitZ, corridorFloor.backHalfWidth);
 
   // 바퀴를 두 벌로 나눈다. roach.root는 '바깥 복사본'이 되고, 같은 자세를
   // 따라가는 '안쪽 복사본'이 옆에 생긴다.
@@ -813,8 +821,8 @@ layOutSurfaces();
 
 // 미리보기 카메라를 포털 아래턱 가까이 가져간다. 바퀴가 4cm라 멀리서는 점이고,
 // 모서리를 넘는 순간을 봐야 한다. 세션에서는 이 값이 헤드셋 포즈에 덮인다. 임시.
-camera.position.set(0, 0.75, -0.35);
-camera.lookAt(0, 0.22, -1.3);
+camera.position.set(0, 1.0, -0.25);
+camera.lookAt(0, 0.4, -1.3);
 
 const viewerPosition = new THREE.Vector3();
 /** 위 값을 면 로컬로 옮긴 것. 마리마다 면이 달라 매번 다시 만든다. */
@@ -871,7 +879,11 @@ renderer.setAnimationLoop((time, frame) => {
 
     // 모서리를 넘었으면 다음 면으로 옮긴다.
     const next = transferIfCrossed(unit.roach, unit.surface);
-    if (next !== unit.surface) unit.surface = next;
+    if (next !== unit.surface) {
+      const name = next === wallFace ? '벽면' : next === roomFloor ? '방 바닥' : '복도 바닥';
+      log(`${units.indexOf(unit)}번 → ${name}`);
+      unit.surface = next;
+    }
   }
 
   // 포털 평면을 바퀴 쪽에 알려 주고, 두 복사본의 자세를 맞춘다.

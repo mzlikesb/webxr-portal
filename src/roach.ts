@@ -196,10 +196,12 @@ export interface Roach {
    */
   setBounds(centerZ: number, radius: number): void;
   /**
-   * 이 로컬 z보다 뒤로는 가지 못한다. 면이 선으로 끝날 때 쓴다 —
-   * 벽면의 위쪽은 벽이 아니라 포털 구멍이다. null이면 제한 없음.
+   * 이 로컬 z보다 뒤로는 가지 못한다. 면이 선으로 끝날 때 쓴다.
+   *
+   * @param halfWidth 이 반폭 안쪽에서는 막지 않는다. 벽면 위쪽이 그렇다 —
+   *   구멍 폭 안이면 복도로 되돌아갈 수 있고, 그 밖은 그냥 벽이다.
    */
-  setBackLimit(z: number | null): void;
+  setBackLimit(z: number | null, halfWidth: number): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +577,8 @@ export function makeRoach(): Roach {
   let boundRadius = WANDER_RADIUS;
   /** 이 z보다 뒤로는 못 간다. 원과 달리 '선'이라, 면이 선으로 끝날 때 쓴다. */
   let backLimit: number | null = null;
+  /** 그 선에 뚫려 있는 문의 반폭. 이 안쪽에서는 막지 않는다. */
+  let backLimitGap = 0;
   /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
   let edgeSide = Math.random() < 0.5 ? 1 : -1;
   /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
@@ -817,9 +821,14 @@ export function makeRoach(): Roach {
         heading += wrapAngle(home - heading) * Math.min(1, dt * 2);
       }
 
-      // 뒤쪽 한계선. 원과 달리 방향이 하나뿐이라 따로 본다. 이 선 너머는
-      // 면이 아니라 허공이다(벽면이라면 포털 구멍).
-      if (backLimit !== null && root.position.z < backLimit) {
+      // 뒤쪽 한계선. 원과 달리 방향이 하나뿐이라 따로 본다.
+      // 가운데가 뚫려 있을 수 있다 — 벽면의 위쪽은 구멍 폭 안에서는 복도로
+      // 이어지고, 그 밖은 그냥 벽이다.
+      if (
+        backLimit !== null &&
+        root.position.z < backLimit &&
+        Math.abs(root.position.x) > backLimitGap
+      ) {
         heading += wrapAngle(0 - heading) * Math.min(1, dt * 4); // 앞(+Z)으로
       }
     }
@@ -1076,8 +1085,9 @@ export function makeRoach(): Roach {
       boundCenterZ = centerZ;
       boundRadius = radius;
     },
-    setBackLimit(z) {
+    setBackLimit(z, halfWidth) {
       backLimit = z;
+      backLimitGap = halfWidth;
     },
   };
 }

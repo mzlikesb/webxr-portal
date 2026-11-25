@@ -27,6 +27,10 @@ export interface WalkSurface {
   /** 로컬 z가 이 값을 넘으면 next로 넘어간다. null이면 사방이 막힌 면. */
   exitZ: number | null;
   next: WalkSurface | null;
+  /** 로컬 z가 0보다 작아지면 돌아가는 면. 모서리는 양방향이다. */
+  prev: WalkSurface | null;
+  /** 되돌아가는 모서리가 실제로 뚫려 있는 반폭. 그 밖은 막힌 벽이다. */
+  backHalfWidth: number;
   /** 이 면 위에서 가고 싶어 하는 방향(heading). null이면 목적 없이 방황. */
   drift: number | null;
   /** 돌아다닐 범위. 면의 로컬 XZ에서 (0, boundCenterZ)를 중심으로 한 원. */
@@ -72,6 +76,8 @@ export function makeWalkSurface(parent: THREE.Object3D): WalkSurface {
     node,
     exitZ: null,
     next: null,
+    prev: null,
+    backHalfWidth: 0,
     drift: null,
     boundCenterZ: 0,
     boundRadius: 0.12,
@@ -92,35 +98,63 @@ export interface Walker {
   setExitZ(z: number | null): void;
   setDrift(newHeading: number | null): void;
   setBounds(centerZ: number, radius: number): void;
-  setBackLimit(z: number | null): void;
+  setBackLimit(z: number | null, halfWidth: number): void;
 }
 
 const fromWorld = new THREE.Quaternion();
 const toWorld = new THREE.Quaternion();
 const relativePose = new THREE.Quaternion();
 
-/**
- * 모서리를 넘었으면 다음 면으로 옮기고 그 면을 돌려준다.
- * 안 넘었으면 지금 면을 그대로 돌려준다.
- */
-export function transferIfCrossed(walker: Walker, current: WalkSurface): WalkSurface {
-  const { exitZ, next } = current;
-  if (exitZ === null || next === null) return current;
-  if (walker.root.position.z <= exitZ) return current;
-
+function moveTo(
+  walker: Walker,
+  from: WalkSurface,
+  to: WalkSurface,
+  z: number,
+  drift: number | null,
+): WalkSurface {
   // 새 면에서 본 옛 면의 자세. 몸이 여기서부터 녹아 새 면에 눕는다.
   // 두 면의 '차이'만 담기므로 heading은 섞이지 않는다.
-  current.node.getWorldQuaternion(fromWorld);
-  next.node.getWorldQuaternion(toWorld);
+  from.node.getWorldQuaternion(fromWorld);
+  to.node.getWorldQuaternion(toWorld);
   relativePose.copy(toWorld).invert().multiply(fromWorld);
 
-  // 규칙 덕분에 x와 heading을 그대로 넘긴다. z만 새 면의 시작으로 되돌린다.
-  // 0이 아니라 살짝 안쪽에 놓는 건, 모서리에 정확히 걸쳐 두면 다음 프레임에
-  // 다시 넘어간 것으로 보일 수 있어서다.
-  walker.placeOn(next.node, walker.root.position.x, 0.002, walker.getHeading(), relativePose);
-  walker.setExitZ(next.exitZ);
-  walker.setDrift(next.drift);
-  walker.setBounds(next.boundCenterZ, next.boundRadius);
-  walker.setBackLimit(next.backLimitZ);
-  return next;
+  // 배치 규칙 덕분에 x와 heading을 그대로 넘긴다. z만 새 면 기준으로 바꾼다.
+  walker.placeOn(to.node, walker.root.position.x, z, walker.getHeading(), relativePose);
+  walker.setExitZ(to.exitZ);
+  walker.setDrift(drift);
+  walker.setBounds(to.boundCenterZ, to.boundRadius);
+  walker.setBackLimit(to.backLimitZ, to.backHalfWidth);
+  return to;
+}
+
+/**
+ * 모서리를 넘었으면 옮기고 새 면을 돌려준다. 안 넘었으면 그대로.
+ *
+ * 모서리는 양방향이다. 앞 모서리(exitZ)를 넘으면 next로, 뒤 모서리(z < 0)를
+ * 넘으면 prev로 간다. 배치 규칙이 대칭이라 같은 변환이 양쪽에 다 쓰인다 —
+ * 바닥에서 벽을 타고 올라가는 것이 벽에서 바닥으로 내려오는 것의 역이다.
+ */
+export function transferIfCrossed(walker: Walker, current: WalkSurface): WalkSurface {
+  const z = walker.root.position.z;
+
+  if (current.exitZ !== null && current.next !== null && z > current.exitZ) {
+    // 모서리에 정확히 걸쳐 두면 다음 프레임에 또 넘어간 것으로 보인다.
+    // 살짝 안쪽에 놓는다.
+    // 앞으로 가는 건 '나가는 길'이다. 그 면이 정한 방향을 따른다.
+    return moveTo(walker, current, current.next, 0.002, current.next.drift);
+  }
+
+  if (current.prev !== null && z < 0) {
+    // 뒤 모서리가 뚫려 있는 폭 안에서만 넘어간다. 벽면의 위쪽이 그렇다 —
+    // 구멍 폭 안이면 복도로 이어지고, 그 밖은 벽이라 넘어갈 데가 없다.
+    if (Math.abs(walker.root.position.x) > current.backHalfWidth) return current;
+
+    const prevExit = current.prev.exitZ;
+    if (prevExit === null) return current;
+    // 되돌아가는 건 나가는 길이 아니다. 목적지를 지우지 않으면, 벽을 타고
+    // 올라온 바퀴가 벽면의 '아래로' 성향에 붙들려 곧장 다시 내려간다.
+    return moveTo(walker, current, current.prev, prevExit - 0.002, null);
+  }
+
+  return current;
 }

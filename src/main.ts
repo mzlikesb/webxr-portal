@@ -599,23 +599,62 @@ scene.add(roachSun);
 const roachGround = new THREE.Group();
 scene.add(roachGround);
 
-const groundYaw = new THREE.Vector3();
+// WORLD_UP은 ⑤에서 포털 자세를 만들 때 이미 선언해 두었다.
+const surfaceNormal = new THREE.Vector3();
+const surfaceForward = new THREE.Vector3();
+const surfaceRight = new THREE.Vector3();
+const surfaceBasis = new THREE.Matrix4();
 
 /**
- * 바퀴가 걷는 평면을 포털에 맞춘다.
+ * 바퀴가 걷는 면의 자세를 세운다.
  *
- * 지금은 포털 중심을 지나는 수평면이다. 절반은 복도 안, 절반은 방 안이라
- * 바퀴가 돌아다니다 포털 평면을 가로지른다 — 지금 확인하려는 게 그거다.
- * 복도 바닥에서 걸어 나와 진짜 방 바닥으로 내려서는 건 아직 아니다.
+ * 바퀴 쪽 코드는 '부모의 XZ 평면 위를 걷는다'만 안다. 그 평면이 바닥인지
+ * 벽인지는 이 함수가 정한다. 면의 바깥 법선(+Y)과 그 면 위에서 heading 0이
+ * 가리킬 방향(+Z)만 주면 나머지는 직교로 따라온다.
+ *
+ * @param normal 면에서 바깥으로 나오는 방향(월드). 바퀴의 등이 향하는 쪽.
+ * @param forwardHint 면 위에서 앞으로 삼고 싶은 방향(월드). 법선 성분은 버린다.
  */
-function alignRoachGroundToPortal(): void {
-  roachGround.position.copy(portal.position);
-  // 포털의 법선을 수평으로 눕혀 바라보는 방향만 남긴다. 평면은 수평이어야
-  // 하므로 기울기는 버리고 yaw만 쓴다.
-  groundYaw.set(0, 0, 1).applyQuaternion(portal.quaternion);
-  roachGround.rotation.set(0, Math.atan2(groundYaw.x, groundYaw.z), 0);
+function orientSurface(
+  target: THREE.Object3D,
+  normal: THREE.Vector3,
+  forwardHint: THREE.Vector3,
+): void {
+  surfaceNormal.copy(normal).normalize();
+  // 힌트에서 법선 성분을 빼면 면 위에 눕는다(그람-슈미트 한 단계).
+  surfaceForward
+    .copy(forwardHint)
+    .addScaledVector(surfaceNormal, -forwardHint.dot(surfaceNormal))
+    .normalize();
+  surfaceRight.crossVectors(surfaceNormal, surfaceForward).normalize();
+
+  surfaceBasis.makeBasis(surfaceRight, surfaceNormal, surfaceForward);
+  target.quaternion.setFromRotationMatrix(surfaceBasis);
+}
+
+/** 바퀴가 걷는 면을 포털에 맞춘다. 미리보기에서 둘을 비교하려고 모드를 둔다. */
+function alignRoachGroundToPortal(onWall: boolean): void {
+  surfaceNormal.set(0, 0, 1).applyQuaternion(portal.quaternion); // 포털 법선
+
+  if (onWall) {
+    // 벽면 위. 등이 방을 향하고, heading 0이면 벽을 타고 올라간다.
+    orientSurface(roachGround, surfaceNormal, WORLD_UP);
+    // 포털 아래턱 바로 밑. 벽에서 1cm 떠서 겹치지 않게.
+    roachGround.position
+      .copy(portal.position)
+      .addScaledVector(WORLD_UP, -PORTAL_HEIGHT / 2 - 0.1)
+      .addScaledVector(surfaceNormal, 0.01);
+  } else {
+    // 포털 중심을 지나는 수평면. 절반은 복도 안, 절반은 방 안이다.
+    orientSurface(roachGround, WORLD_UP, surfaceNormal);
+    roachGround.position.copy(portal.position);
+  }
+
   roachGround.updateMatrixWorld();
 }
+
+/** ?surface=wall 로 벽면 모드. 면 방향을 일반화한 게 통하는지 보려고. 임시. */
+const PREVIEW_ON_WALL = new URLSearchParams(location.search).get('surface') === 'wall';
 
 // 걸음이 미끄러지는지 눈으로 보려면 바닥 무늬가 있어야 한다. 임시.
 const groundGrid = new THREE.GridHelper(0.4, 40, 0x335544, 0x223333);
@@ -641,7 +680,7 @@ placePortal();
 // 되돌린다. 임시.
 const PREVIEW_ROACH_SCALE = 4;
 roachGround.scale.setScalar(PREVIEW_ROACH_SCALE);
-alignRoachGroundToPortal();
+alignRoachGroundToPortal(PREVIEW_ON_WALL);
 
 const viewerPosition = new THREE.Vector3();
 
@@ -684,7 +723,7 @@ renderer.setAnimationLoop((time, frame) => {
     // 포털을 놓은 자리로 바퀴의 땅을 옮긴다. 세션 안에서는 실제 크기로.
     roachGround.scale.setScalar(frame === undefined ? PREVIEW_ROACH_SCALE : 1);
     groundGrid.visible = frame === undefined; // 격자는 미리보기용 보조선이다
-    alignRoachGroundToPortal();
+    alignRoachGroundToPortal(PREVIEW_ON_WALL);
 
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
     roachCrossing.setPlane(portal.position, portalFacing);

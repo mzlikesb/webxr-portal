@@ -172,6 +172,11 @@ export interface Roach {
    * 성격은 그대로 두고, 길게 보면 그쪽으로 흘러간다. null이면 목적 없음.
    */
   setDrift(newHeading: number | null): void;
+  /**
+   * 돌아다닐 수 있는 범위. 면의 로컬 XZ에서 (0, centerZ)를 중심으로 한 원이다.
+   * 면마다 크기가 다르므로 밖에서 정한다.
+   */
+  setBounds(centerZ: number, radius: number): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +514,9 @@ export function makeRoach(): Roach {
   let exitZ: number | null = null;
   /** 결국 가고 싶은 방향. 없으면 순수한 방황. */
   let driftHeading: number | null = null;
+  /** 활동 범위. 면마다 다르다 — 복도 바닥은 좁고 벽면은 바닥까지 길다. */
+  let boundCenterZ = 0;
+  let boundRadius = WANDER_RADIUS;
   /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
   let edgeSide = Math.random() < 0.5 ? 1 : -1;
   /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
@@ -686,7 +694,7 @@ export function makeRoach(): Roach {
     // 두되, 길게 보면 결국 그쪽으로 흘러간다. 이게 없으면 바퀴가 원 둘레만
     // 돌다가 끝난다 — 나갈 이유가 없으니까.
     if (driftHeading !== null && speed > 0.005) {
-      heading += wrapAngle(driftHeading - heading) * Math.min(1, dt * 0.6);
+      heading += wrapAngle(driftHeading - heading) * Math.min(1, dt * 1.5);
     }
   }
 
@@ -710,21 +718,28 @@ export function makeRoach(): Roach {
     //
     // 벽 쪽으로 밀지도, 중앙으로 되돌리지도 않는다. 벽의 '접선' 방향을
     // 목표 삼고, 간격이 틀어진 만큼만 법선 성분을 섞는다.
-    const away = Math.hypot(root.position.x, root.position.z);
+    const offsetZ = root.position.z - boundCenterZ;
+    const away = Math.hypot(root.position.x, offsetZ);
     wallOnRight = 0;
 
     // 멈춰 있을 때는 조향하지 않는다. 안 그러면 벽 옆에 선 채로 각도만
     // 영원히 맞추느라 제자리에서 빙빙 돈다 — 멈춤이 멈춤이 아니게 된다.
     if (state !== 'startle' && speed > 0.005 && away > 0.001) {
-      const gap = WANDER_RADIUS - away; // 벽까지 남은 거리. 음수면 넘어갔다.
+      const gap = boundRadius - away; // 벽까지 남은 거리. 음수면 넘어갔다.
       const nx = root.position.x / away; // 벽을 향하는 바깥 방향
-      const nz = root.position.z / away;
+      const nz = offsetZ / away;
 
       // 나가는 문 쪽은 막지 않는다. 벽을 따라가다가도 문 근처에 오면
       // 조향을 놓아 줘서, 걸어 나갈 수 있게 한다.
       const atExit = exitZ !== null && root.position.z > exitZ - EDGE_BAND * 2;
 
-      if (gap < EDGE_BAND && !atExit) {
+      // 주촉성은 '머무르며 살피는' 면의 행동이다. 가고 싶은 방향이 정해진
+      // 면(복도 바닥, 벽면)에서는 끈다. 안 그러면 경계 원을 따라 빙빙 돌기만
+      // 하고 목적지에 영영 닿지 않는다. 그때 경계는 '넘어가면 되돌리는'
+      // 최후의 선으로만 남는다.
+      const exploring = driftHeading === null;
+
+      if (exploring && gap < EDGE_BAND && !atExit) {
         // 접선. edgeSide가 도는 방향을 정한다.
         const tx = -nz * edgeSide;
         const tz = nx * edgeSide;
@@ -738,6 +753,10 @@ export function makeRoach(): Roach {
 
         // 가끔 도는 방향을 바꾼다. 늘 같은 쪽으로만 돌면 궤도처럼 보인다.
         if (Math.random() < dt * 0.15) edgeSide = -edgeSide;
+      } else if (gap < 0 && !atExit) {
+        // 범위를 벗어났다. 중심 쪽으로 되돌린다.
+        const home = Math.atan2(-root.position.x, -offsetZ);
+        heading += wrapAngle(home - heading) * Math.min(1, dt * 2);
       }
     }
 
@@ -984,6 +1003,10 @@ export function makeRoach(): Roach {
     },
     setDrift(newHeading) {
       driftHeading = newHeading;
+    },
+    setBounds(centerZ, radius) {
+      boundCenterZ = centerZ;
+      boundRadius = radius;
     },
   };
 }

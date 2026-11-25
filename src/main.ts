@@ -607,12 +607,26 @@ scene.add(roachSun);
 // 둘 다 원점을 아래턱 선 위에 두고 로컬 X를 그 선과 나란히 둔다(walk-surface.ts).
 const corridorFloor = makeWalkSurface(scene);
 const wallFace = makeWalkSurface(scene);
+const roomFloor = makeWalkSurface(scene);
 
 corridorFloor.next = wallFace;
 corridorFloor.exitZ = 0; // 아래턱을 넘으면 벽면으로
-// 두 면 모두 +Z가 '계속 가는 쪽'이다. 복도에서는 구멍 밖, 벽에서는 아래로.
+wallFace.next = roomFloor; // 벽을 다 내려오면 방 바닥으로 (높이는 아래에서)
+
+// 세 면 모두 +Z가 '계속 가는 쪽'이다.
+// 복도에서는 구멍 밖, 벽에서는 아래로, 바닥에서는 벽에서 멀어지는 쪽.
 corridorFloor.drift = 0;
 wallFace.drift = 0;
+// 방 바닥에는 목적지가 없다. 여기서부터는 주촉성으로 가장자리를 살피며
+// 돌아다닌다 — 나온 뒤의 행동이다.
+roomFloor.drift = null;
+
+// 돌아다닐 범위. 면마다 모양이 달라서 따로 준다.
+// 복도 바닥은 구멍 안쪽으로 좁게, 방 바닥은 넓게.
+corridorFloor.boundCenterZ = -0.12;
+corridorFloor.boundRadius = 0.2;
+roomFloor.boundCenterZ = 0.25;
+roomFloor.boundRadius = 0.4;
 
 /** 두 면을 포털 자리에 맞춰 세운다. 포털을 옮기면 다시 부른다. */
 function layOutSurfaces(): void {
@@ -634,8 +648,25 @@ function layOutSurfaces(): void {
   wallFace.node.position.copy(sill);
   orientSurface(wallFace.node, portalNormal, WORLD_UP.clone().negate());
 
-  corridorFloor.node.updateMatrixWorld();
-  wallFace.node.updateMatrixWorld();
+  // 방 바닥: 수평, +Z가 벽에서 멀어지는 쪽.
+  // 원점은 벽이 바닥과 만나는 선 위, 아래턱 바로 밑이다. 벽면과 로컬 X를
+  // 공유하므로(둘 다 up × 법선) 모서리를 넘을 때 x가 그대로 보존된다.
+  // local-floor 기준 공간이라 진짜 바닥이 y = 0이다.
+  roomFloor.node.position.set(sill.x, 0, sill.z);
+  roomFloor.node.position.addScaledVector(portalNormal, 0.001);
+  orientSurface(roomFloor.node, WORLD_UP, portalNormal);
+
+  // 아래턱에서 바닥까지의 거리. 벽면의 로컬 +Z가 아래를 향하므로 그대로 쓴다.
+  // 포털을 아주 낮게 걸면 내려갈 벽이 없다. 그때는 출구를 없앤다.
+  const dropHeight = sill.y;
+  wallFace.exitZ = dropHeight > 0.05 ? dropHeight : null;
+  // 아래턱 위로는 구멍이 뚫려 있으니 조금만 올라가게 하고, 아래로는 바닥까지.
+  wallFace.boundCenterZ = dropHeight / 2;
+  wallFace.boundRadius = dropHeight / 2 + 0.12;
+
+  for (const surface of [corridorFloor, wallFace, roomFloor]) {
+    surface.node.updateMatrixWorld();
+  }
 }
 
 
@@ -644,6 +675,7 @@ function layOutSurfaces(): void {
 const surfaceGrids = [
   { surface: corridorFloor, side: -1 }, // 복도 바닥은 아래턱 안쪽(-Z)만 유효
   { surface: wallFace, side: 1 }, // 벽면은 아래턱 아래쪽(+Z)만 유효
+  { surface: roomFloor, side: 1 }, // 방 바닥은 벽 바깥쪽(+Z)만 유효
 ].map(({ surface, side }) => {
   const grid = new THREE.GridHelper(0.4, 40, 0x335544, 0x223333);
   // GridHelper는 원점 중심이다. 면의 원점은 모서리 위에 있으므로 그대로 두면
@@ -659,6 +691,7 @@ const roach = makeRoach();
 let currentSurface: WalkSurface = corridorFloor;
 roach.placeOn(corridorFloor.node, 0, -0.1, 0); // 구멍 안쪽에서 시작, 밖을 보고
 roach.setExitZ(corridorFloor.exitZ);
+roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
 // 복도 바닥에서는 구멍 밖(+Z)으로 나가려 한다. 이 작품에서 바퀴는 포털에서
 // 나오는 존재다.
 roach.setDrift(corridorFloor.drift);
@@ -678,8 +711,8 @@ layOutSurfaces();
 
 // 미리보기 카메라를 포털 아래턱 가까이 가져간다. 바퀴가 4cm라 멀리서는 점이고,
 // 모서리를 넘는 순간을 봐야 한다. 세션에서는 이 값이 헤드셋 포즈에 덮인다. 임시.
-camera.position.set(0, 0.62, -0.85);
-camera.lookAt(0, 0.38, -1.3);
+camera.position.set(0, 0.75, -0.35);
+camera.lookAt(0, 0.22, -1.3);
 
 const viewerPosition = new THREE.Vector3();
 
@@ -721,7 +754,9 @@ renderer.setAnimationLoop((time, frame) => {
   const nextSurface = transferIfCrossed(roach, currentSurface);
   if (nextSurface !== currentSurface) {
     currentSurface = nextSurface;
-    log(`모서리를 넘었다 → ${currentSurface === wallFace ? '벽면' : '복도 바닥'}`);
+    const name =
+      currentSurface === wallFace ? '벽면' : currentSurface === roomFloor ? '방 바닥' : '복도 바닥';
+    log(`모서리를 넘었다 → ${name}`);
   }
 
   // 포털 평면을 바퀴 쪽에 알려 주고, 두 복사본의 자세를 맞춘다.

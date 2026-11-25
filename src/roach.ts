@@ -147,6 +147,21 @@ export interface Roach {
   update(dt: number, speedScale: number, threat: THREE.Vector3 | null): void;
   /** 밖에서 강제로 놀래킨다. 위치는 땅 공간. */
   scare(x: number, z: number): void;
+  /**
+   * 다른 면으로 옮겨 놓는다. 모서리를 넘을 때 쓴다.
+   * 위치와 방향은 모두 새 면의 로컬 기준이고, 발은 거기서 새로 디딘다.
+   */
+  placeOn(parent: THREE.Object3D, x: number, z: number, newHeading: number): void;
+  /**
+   * 이 로컬 z 너머는 '나가는 문'이라 경계 조향을 하지 않는다.
+   * null이면 사방이 막힌 면이다.
+   */
+  setExitZ(z: number | null): void;
+  /**
+   * 이 면 위에서 결국 가고 싶어 하는 방향(heading). 약한 편향이라 돌아다니는
+   * 성격은 그대로 두고, 길게 보면 그쪽으로 흘러간다. null이면 목적 없음.
+   */
+  setDrift(newHeading: number | null): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +495,10 @@ export function makeRoach(): Roach {
   let groomSide = 1;
   /** 그루밍 동작의 자체 시계. */
   let groomT = 0;
+  /** 이 z를 넘으면 다른 면으로 나가는 문. 그쪽으로는 막지 않는다. */
+  let exitZ: number | null = null;
+  /** 결국 가고 싶은 방향. 없으면 순수한 방황. */
+  let driftHeading: number | null = null;
   /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
   let edgeSide = Math.random() < 0.5 ? 1 : -1;
   /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
@@ -616,6 +635,15 @@ export function makeRoach(): Roach {
     }
 
     heading += turnRate * dt;
+
+    // 가고 싶은 방향이 있으면 아주 천천히 그쪽으로 끌린다.
+    //
+    // 레일이 아니라 성향이다. 돌아다니다 멈추고 벽을 따라가는 성격은 그대로
+    // 두되, 길게 보면 결국 그쪽으로 흘러간다. 이게 없으면 바퀴가 원 둘레만
+    // 돌다가 끝난다 — 나갈 이유가 없으니까.
+    if (driftHeading !== null && speed > 0.005) {
+      heading += wrapAngle(driftHeading - heading) * Math.min(1, dt * 0.6);
+    }
   }
 
   /** 상태와 무관하게 매 프레임 도는 이동 처리. */
@@ -648,7 +676,11 @@ export function makeRoach(): Roach {
       const nx = root.position.x / away; // 벽을 향하는 바깥 방향
       const nz = root.position.z / away;
 
-      if (gap < EDGE_BAND) {
+      // 나가는 문 쪽은 막지 않는다. 벽을 따라가다가도 문 근처에 오면
+      // 조향을 놓아 줘서, 걸어 나갈 수 있게 한다.
+      const atExit = exitZ !== null && root.position.z > exitZ - EDGE_BAND * 2;
+
+      if (gap < EDGE_BAND && !atExit) {
         // 접선. edgeSide가 도는 방향을 정한다.
         const tx = -nz * edgeSide;
         const tz = nx * edgeSide;
@@ -857,8 +889,32 @@ export function makeRoach(): Roach {
     }
   }
 
+  function placeOn(parent: THREE.Object3D, x: number, z: number, newHeading: number): void {
+    if (root.parent !== parent) parent.add(root); // add가 이전 부모에서 떼어낸다
+
+    root.position.set(x, 0, z);
+    heading = newHeading;
+    root.rotation.y = heading;
+    root.updateMatrixWorld();
+
+    // 발 자국은 이전 면의 좌표였다. 새 면에서 다시 디딘다.
+    plantAll();
+    prevThreatDistance = Infinity;
+  }
+
   plantAll();
   update(0.001, 1, null);
 
-  return { root, update, scare };
+  return {
+    root,
+    update,
+    scare,
+    placeOn,
+    setExitZ(z) {
+      exitZ = z;
+    },
+    setDrift(newHeading) {
+      driftHeading = newHeading;
+    },
+  };
 }

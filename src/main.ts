@@ -658,6 +658,18 @@ const EMERGE_DISTANCE = 1.0;
 
 let hasEmerged = false;
 
+/** 대기 구역 안의 아무 자리에 놓는다. 원 안에 고르게 퍼지도록 반지름에 √를 쓴다. */
+function scatterInLurk(roach: Roach): void {
+  const angle = Math.random() * Math.PI * 2;
+  const radius = Math.sqrt(Math.random()) * LURK_RADIUS * 0.8;
+  roach.placeOn(
+    corridorFloor.node,
+    Math.cos(angle) * radius,
+    LURK_CENTER_Z + Math.sin(angle) * radius,
+    Math.random() * Math.PI * 2,
+  );
+}
+
 function beginLurking(): void {
   hasEmerged = false;
   corridorFloor.boundCenterZ = LURK_CENTER_Z;
@@ -668,16 +680,11 @@ function beginLurking(): void {
 /** 바퀴들을 복도 깊은 곳으로 되돌린다. 세션을 새로 시작할 때마다 부른다. */
 function resetRoaches(): void {
   beginLurking();
-  units.forEach((unit, i) => {
+  for (const unit of units) {
     unit.surface = corridorFloor;
-    unit.roach.placeOn(
-      corridorFloor.node,
-      (i - (units.length - 1) / 2) * 0.09,
-      LURK_CENTER_Z - i * 0.06,
-      0,
-    );
+    scatterInLurk(unit.roach);
     applySurface(unit);
-  });
+  }
 }
 
 /** 지금 올라서 있는 면의 설정을 바퀴에게 적용한다. */
@@ -775,7 +782,7 @@ interface RoachUnit {
 }
 
 /** 몇 마리나 둘지. 드로우콜을 재 보려고 올려 둔 값이기도 하다. */
-const ROACH_COUNT = 4;
+const ROACH_COUNT = 8;
 
 const units: RoachUnit[] = [];
 
@@ -788,13 +795,8 @@ setPortalStencilRef(PORTAL_STENCIL_REF);
 for (let i = 0; i < ROACH_COUNT; i += 1) {
   const roach = makeRoach();
 
-  // 복도 깊은 곳에 흩어 둔다. 한 점에 겹쳐 두면 처음 몇 초가 어색하다.
-  roach.placeOn(
-    corridorFloor.node,
-    (i - (ROACH_COUNT - 1) / 2) * 0.09,
-    LURK_CENTER_Z - i * 0.06,
-    0,
-  );
+  // 복도 깊은 곳에 흩어 둔다. 줄 세워 놓으면 한눈에 '배치했구나' 싶어진다.
+  scatterInLurk(roach);
   roach.setExitZ(corridorFloor.exitZ);
   roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
   roach.setDrift(corridorFloor.drift);

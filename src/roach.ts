@@ -440,7 +440,10 @@ function makeContactShadow(): THREE.Mesh {
     transparent: true,
     depthWrite: false, // 그림자가 깊이를 쓰면 다리가 그 위에서 잘린다
   });
-  shadowGeometry = new THREE.PlaneGeometry(ROACH_LENGTH * 1.5, ROACH_LENGTH * 0.8);
+  // PlaneGeometry(width, height)는 X-Y에 눕는다. rotation.x로 눕히면 width가
+  // 몸의 좌우(X), height가 몸의 앞뒤(Z)가 된다. 몸은 앞뒤로 긴 타원이므로
+  // height 쪽이 커야 한다 — 처음에 반대로 줘서 그림자가 옆으로 퍼져 있었다.
+  shadowGeometry = new THREE.PlaneGeometry(ROACH_LENGTH * 0.7, ROACH_LENGTH * 1.3);
   const shadow = new THREE.Mesh(shadowGeometry, shadowMaterial);
   shadow.rotation.x = -Math.PI / 2; // 바닥에 눕힌다
   shadow.position.y = 0.0005; // 바닥과 겹쳐 z-fighting이 나지 않게

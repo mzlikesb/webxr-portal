@@ -1,8 +1,14 @@
 import * as THREE from 'three';
 import { makeRoach } from './roach';
 import type { Roach } from './roach';
-import { makePortalCrossing } from './portal-crossing';
+import {
+  disablePortalPlane,
+  makePortalCrossing,
+  setPortalPlane,
+  setPortalStencilRef,
+} from './portal-crossing';
 import type { PortalCrossing } from './portal-crossing';
+import { makeInstanceBatch } from './instance-batch';
 import { makeWalkSurface, orientSurface, transferIfCrossed } from './walk-surface';
 import type { WalkSurface } from './walk-surface';
 
@@ -765,6 +771,12 @@ const ROACH_COUNT = 4;
 
 const units: RoachUnit[] = [];
 
+// 부품을 조합별로 묶어 그린다. 등록한 메시는 숨겨지고, 모양은 인스턴스가 낸다.
+const roachBatch = makeInstanceBatch(scene);
+
+// 복사본을 만들기 전에 알려 줘야 한다. 재질에 한 번만 구워진다.
+setPortalStencilRef(PORTAL_STENCIL_REF);
+
 for (let i = 0; i < ROACH_COUNT; i += 1) {
   const roach = makeRoach();
 
@@ -782,11 +794,12 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
 
   // 바퀴를 두 벌로 나눈다. roach.root는 '바깥 복사본'이 되고, 같은 자세를
   // 따라가는 '안쪽 복사본'이 옆에 생긴다.
-  units.push({
-    roach,
-    crossing: makePortalCrossing(roach.root, PORTAL_STENCIL_REF),
-    surface: corridorFloor,
-  });
+  const crossing = makePortalCrossing(roach.root);
+  units.push({ roach, crossing, surface: corridorFloor });
+
+  // 두 벌 모두 배칭에 넘긴다. 안쪽은 재질이 달라 따로 묶인다.
+  roachBatch.register(roach.root);
+  roachBatch.register(crossing.inside);
 }
 
 // 데스크톱 미리보기용 가짜 포털. 헤드셋 없이는 이 그림을 아예 볼 수 없다.
@@ -868,14 +881,14 @@ renderer.setAnimationLoop((time, frame) => {
     for (const grid of surfaceGrids) grid.visible = frame === undefined;
 
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
-    for (const unit of units) {
-      unit.crossing.setPlane(portal.position, portalFacing);
-      unit.crossing.setDisabled(false);
-    }
+    setPortalPlane(portal.position, portalFacing);
   } else {
-    for (const unit of units) unit.crossing.setDisabled(true);
+    disablePortalPlane();
   }
   for (const unit of units) unit.crossing.sync();
+
+  // 자세가 다 정해진 뒤에 행렬을 모은다. render보다 먼저여야 한다.
+  roachBatch.sync();
 
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();
@@ -897,7 +910,10 @@ renderer.setAnimationLoop((time, frame) => {
   if (costTimer > 3) {
     costTimer = 0;
     const info = renderer.info.render;
-    log(`바퀴 ${units.length}마리 · 드로우콜 ${info.calls} · 삼각형 ${info.triangles}`);
+    log(
+      `바퀴 ${units.length}마리 · 드로우콜 ${info.calls} · 삼각형 ${info.triangles}` +
+        ` · 묶음 ${roachBatch.poolCount()}`,
+    );
   }
 });
 

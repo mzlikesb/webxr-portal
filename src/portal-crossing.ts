@@ -20,22 +20,49 @@ import * as THREE from 'three';
 // 클리핑 평면이 한다 — 지오메트리를 건드리지 않고 프래그먼트 단위로 버린다.
 //
 // 쓰려면 renderer.localClippingEnabled = true 가 필요하다.
+//
+// ── 평면과 재질은 모두가 나눠 쓴다 ──
+//
+// 포털은 하나뿐이므로 자르는 평면도 한 쌍이면 된다. 그리고 재질을 물체마다
+// 복제하면 인스턴싱으로 묶이지 않는다 — 같은 지오메트리라도 재질이 다르면
+// 다른 드로우콜이다. 그래서 둘 다 모듈 수준에 하나씩 둔다.
 // ---------------------------------------------------------------------------
 
-export interface PortalCrossing {
-  /**
-   * 포털 평면이 놓인 자리를 알려 준다. 포털을 옮기면 다시 불러야 한다.
-   * @param point 평면 위의 한 점(월드)
-   * @param normal 방 쪽을 향하는 법선(월드)
-   */
-  setPlane(point: THREE.Vector3, normal: THREE.Vector3): void;
-  /** 매 프레임. 바깥 복사본의 자세를 안쪽 복사본에 그대로 옮긴다. */
-  sync(): void;
-  /** 포털이 아직 없을 때. 두 복사본 모두 자르지 않고 평범하게 그린다. */
-  setDisabled(disabled: boolean): void;
+/** 방 쪽 반공간만 남긴다. three.js의 클리핑은 법선이 가리키는 쪽을 살린다. */
+const frontPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e4);
+/** 같은 평면, 반대 방향. 둘이 합쳐 공간 전체를 빈틈없이 덮는다. */
+const backPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 1e4);
+
+const outsideVariants = new Map<THREE.Material, THREE.Material>();
+const insideVariants = new Map<THREE.Material, THREE.Material>();
+
+let stencilRef = 1;
+let disabled = true;
+
+/**
+ * 포털 평면이 놓인 자리를 알려 준다. 포털을 옮기면 다시 부른다.
+ * @param point 평면 위의 한 점(월드)
+ * @param normal 방 쪽을 향하는 법선(월드)
+ */
+export function setPortalPlane(point: THREE.Vector3, normal: THREE.Vector3): void {
+  frontPlane.setFromNormalAndCoplanarPoint(normal, point);
+  backPlane.copy(frontPlane).negate();
+  disabled = false;
 }
 
-/** 재질을 복제하고 손본다. 원본을 공유하면 한쪽 설정이 다른 쪽까지 바꾼다. */
+/** 포털이 아직 없을 때. 아무것도 자르지 않고, 안쪽 복사본은 그리지 않는다. */
+export function disablePortalPlane(): void {
+  // 아주 먼 곳으로 밀어 두면 아무것도 잘리지 않는다.
+  frontPlane.constant = 1e4;
+  backPlane.constant = 1e4;
+  disabled = true;
+}
+
+/** 포털 마스크가 스텐실에 찍는 값. 복사본을 만들기 전에 정해야 한다. */
+export function setPortalStencilRef(ref: number): void {
+  stencilRef = ref;
+}
+
 function variantOf(
   material: THREE.Material,
   cache: Map<THREE.Material, THREE.Material>,
@@ -52,10 +79,9 @@ function variantOf(
 
 function replaceMaterials(
   object: THREE.Object3D,
+  cache: Map<THREE.Material, THREE.Material>,
   configure: (m: THREE.Material) => void,
 ): void {
-  const cache = new Map<THREE.Material, THREE.Material>();
-
   object.traverse((node) => {
     const mesh = node as THREE.Mesh;
     if (mesh.material === undefined) return;
@@ -80,29 +106,25 @@ function copyTransforms(from: THREE.Object3D, to: THREE.Object3D): void {
   }
 }
 
-/**
- * @param outside 이미 씬에 들어 있는 물체. 이것이 '바깥 복사본'이 된다.
- * @param stencilRef 포털 마스크가 찍는 값.
- */
-export function makePortalCrossing(
-  outside: THREE.Object3D,
-  stencilRef: number,
-): PortalCrossing {
-  // 방 쪽 반공간만 남긴다. three.js의 클리핑은 법선이 가리키는 쪽을 살린다.
-  const frontPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e4);
-  // 벽 뒤 반공간만 남긴다.
-  const backPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 1e4);
+export interface PortalCrossing {
+  /** 안쪽 복사본. 배칭에 등록하려면 바깥에서도 쥐고 있어야 한다. */
+  inside: THREE.Object3D;
+  /** 매 프레임. 바깥 복사본의 자세를 안쪽 복사본에 그대로 옮긴다. */
+  sync(): void;
+}
 
+/** @param outside 이미 씬에 들어 있는 물체. 이것이 '바깥 복사본'이 된다. */
+export function makePortalCrossing(outside: THREE.Object3D): PortalCrossing {
   const inside = outside.clone(true);
   outside.parent?.add(inside);
 
   // 바깥: 자르기만 한다. 스텐실은 건드리지 않는다.
-  replaceMaterials(outside, (m) => {
+  replaceMaterials(outside, outsideVariants, (m) => {
     m.clippingPlanes = [frontPlane];
   });
 
   // 안쪽: 반대쪽을 남기고, 포털 마스크가 찍어 둔 자리에만 그린다.
-  replaceMaterials(inside, (m) => {
+  replaceMaterials(inside, insideVariants, (m) => {
     m.clippingPlanes = [backPlane];
     m.stencilWrite = true;
     m.stencilRef = stencilRef;
@@ -114,23 +136,8 @@ export function makePortalCrossing(
     node.renderOrder = 1;
   });
 
-  let disabled = false;
-
   return {
-    setPlane(point, normal) {
-      frontPlane.setFromNormalAndCoplanarPoint(normal, point);
-      // 같은 평면, 반대 방향. 둘이 합쳐 공간 전체를 빈틈없이 덮는다.
-      backPlane.copy(frontPlane).negate();
-    },
-
-    setDisabled(value) {
-      disabled = value;
-      if (disabled) {
-        // 아주 먼 곳으로 밀어 두면 아무것도 잘리지 않는다.
-        frontPlane.constant = 1e4;
-        backPlane.constant = 1e4;
-      }
-    },
+    inside,
 
     sync() {
       // 원본이 다른 면으로 옮겨 갔으면 복제본도 따라간다.

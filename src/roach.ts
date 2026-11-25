@@ -80,6 +80,14 @@ const EDGE_HUG = 0.012;
 
 const IDENTITY = new THREE.Quaternion();
 
+// 바퀴벌레는 반드르르하다. 거친 재질로 두면 플라스틱 장난감처럼 보인다.
+// roughness를 낮춰 directional light의 하이라이트가 또렷하게 맺히게 한다 —
+// 멀리서도 '젖은 듯한 광택'이 먼저 읽힌다.
+const shell = new THREE.MeshStandardMaterial({ color: 0x3a2416, roughness: 0.3 });
+const wingShell = new THREE.MeshStandardMaterial({ color: 0x2b190d, roughness: 0.22 });
+const limb = new THREE.MeshStandardMaterial({ color: 0x241509, roughness: 0.6 });
+const eye = new THREE.MeshStandardMaterial({ color: 0x0b0806, roughness: 0.15 });
+
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 const rand = (lo: number, hi: number): number => lo + Math.random() * (hi - lo);
 /** 각도를 -π~π로 접는다. 두 각의 차를 다룰 때 필요하다. */
@@ -248,14 +256,42 @@ function solveLeg(spec: LegSpec, reach: number, rise: number, out: JointAngles):
 // 모양 (아직 대충)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 공유 자원
+//
+// 지오메트리와 재질은 마리마다 새로 만들지 않고 한 벌만 만들어 돌려 쓴다.
+// 모양이 같으니 메모리 때문만이 아니다 — 인스턴싱으로 묶으려면 '같은 지오메트리,
+// 같은 재질'이어야 한 번의 드로우콜로 들어간다. 마리마다 따로 만들면 풀이
+// 마리 수만큼 쪼개져서 배칭이 아무 의미가 없어진다.
+// ---------------------------------------------------------------------------
+const geometryCache = new Map<string, THREE.BufferGeometry>();
+
+function shared<T extends THREE.BufferGeometry>(key: string, make: () => T): THREE.BufferGeometry {
+  const cached = geometryCache.get(key);
+  if (cached !== undefined) return cached;
+  const made = make();
+  geometryCache.set(key, made);
+  return made;
+}
+
 /** 다리 마디 하나. +X 방향으로 길게 누운 원통. */
-function limbGeometry(length: number, rootRadius: number, tipRadius: number): THREE.BufferGeometry {
+function makeLimbGeometry(length: number, rootRadius: number, tipRadius: number): THREE.BufferGeometry {
   const geometry = new THREE.CylinderGeometry(tipRadius, rootRadius, length, 6, 1);
   // CylinderGeometry는 +Y로 서 있다. 눕히고, 뿌리가 원점에 오도록 민다.
   // 지오메트리를 돌려 두면 그룹의 회전을 순수하게 관절 각도로만 쓸 수 있다.
   geometry.rotateZ(-Math.PI / 2);
   geometry.translate(length / 2, 0, 0);
   return geometry;
+}
+
+function limbGeometry(length: number, rootRadius: number, tipRadius: number): THREE.BufferGeometry {
+  return shared(`limb:${length}:${rootRadius}:${tipRadius}`, () =>
+    makeLimbGeometry(length, rootRadius, tipRadius),
+  );
+}
+
+function sphereGeometry(r: number, w: number, h: number): THREE.BufferGeometry {
+  return shared(`sphere:${r}:${w}:${h}`, () => new THREE.SphereGeometry(r, w, h));
 }
 
 /**
@@ -306,20 +342,20 @@ function buildBody(
   // 각 덩어리의 '중심 y − 세로 반지름'이 0보다 커야 한다.
   // 배 + 날개. 몸의 대부분을 차지하는 납작한 타원.
   // 폭 0.41 / 전체 길이 1.03 ≈ 0.40, 실측 0.375에 가깝다.
-  const abdomen = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), material);
+  const abdomen = new THREE.Mesh(sphereGeometry(0.3, 16, 12), material);
   abdomen.scale.set(0.68, 0.26, 1.3); // 폭 0.41, 세로 반지름 0.078, 길이 0.78
   abdomen.position.set(0, 0.105, -0.12); // 아랫면 0.027, 뒤끝 -0.51
   body.add(abdomen);
 
   // 앞가슴판. 머리를 덮는 방패다. 실측은 '폭이 길이의 2.5배'라
   // 앞뒤로 짧고 좌우로 넓다. 바퀴벌레를 위에서 봤을 때의 인상이 여기서 나온다.
-  const pronotum = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 12), material);
+  const pronotum = new THREE.Mesh(sphereGeometry(0.22, 16, 12), material);
   pronotum.scale.set(1, 0.34, 0.4); // 폭 0.44, 길이 0.176 → 2.5배
   pronotum.position.set(0, 0.115, 0.3);
   body.add(pronotum);
 
   // 머리. 앞가슴판 아래로 거의 숨는다.
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 10), material);
+  const head = new THREE.Mesh(sphereGeometry(0.11, 12, 10), material);
   head.scale.set(0.85, 0.55, 0.7);
   head.position.set(0, 0.09, 0.44);
   body.add(head);
@@ -327,7 +363,7 @@ function buildBody(
   // 눈. 머리 양옆에 붙은 납작한 콩 모양. 작지만 이게 없으면 머리가
   // 그냥 덩어리로 보인다.
   for (const side of [1, -1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.038, 8, 6), eyeMaterial);
+    const eye = new THREE.Mesh(sphereGeometry(0.038, 8, 6), eyeMaterial);
     eye.scale.set(0.7, 1.1, 1.3);
     eye.position.set(side * 0.075, 0.105, 0.455);
     body.add(eye);
@@ -347,7 +383,7 @@ function buildBody(
   // 위에서 본 바퀴벌레의 인상은 앞가슴판 방패와 이 가운데 이음선, 둘이 거의
   // 전부다. 바깥쪽을 살짝 떨구면 등이 둥글게 말린 느낌이 난다.
   for (const side of [1, -1]) {
-    const wing = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), wingMaterial);
+    const wing = new THREE.Mesh(sphereGeometry(0.3, 16, 12), wingMaterial);
     wing.scale.set(0.567, 0.05, 1.17); // 반폭 0.17, 두께 0.015, 반길이 0.35
     wing.position.set(side * 0.055, 0.175, -0.13); // 가운데서 겹치도록 안쪽으로
     wing.rotation.z = -side * 0.12; // 바깥 가장자리를 아래로
@@ -367,7 +403,20 @@ function buildBody(
  * 그래서 가운데가 진하고 가장자리로 흐려지는 얼룩 하나를 몸 밑에 깔아 둔다.
  * 방향은 없고 '여기 뭔가 닿아 있다'만 말한다. 흔히 쓰는 타협이다.
  */
+let shadowGeometry: THREE.BufferGeometry | null = null;
+let shadowMaterial: THREE.Material | null = null;
+
 function makeContactShadow(): THREE.Mesh {
+  // 두 번째 마리부터는 만들어 둔 것을 그대로 쓴다. 캔버스를 다시 그리지 않는
+  // 것보다, 같은 지오메트리·재질이어야 인스턴싱으로 묶인다는 쪽이 중요하다.
+  if (shadowGeometry !== null && shadowMaterial !== null) {
+    const reused = new THREE.Mesh(shadowGeometry, shadowMaterial);
+    reused.rotation.x = -Math.PI / 2;
+    reused.position.y = 0.0005;
+    reused.renderOrder = -1;
+    return reused;
+  }
+
   const size = 64;
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -384,14 +433,13 @@ function makeContactShadow(): THREE.Mesh {
   }
 
   const texture = new THREE.CanvasTexture(canvas);
-  const shadow = new THREE.Mesh(
-    new THREE.PlaneGeometry(ROACH_LENGTH * 1.5, ROACH_LENGTH * 0.8),
-    new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      depthWrite: false, // 그림자가 깊이를 쓰면 다리가 그 위에서 잘린다
-    }),
-  );
+  shadowMaterial = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false, // 그림자가 깊이를 쓰면 다리가 그 위에서 잘린다
+  });
+  shadowGeometry = new THREE.PlaneGeometry(ROACH_LENGTH * 1.5, ROACH_LENGTH * 0.8);
+  const shadow = new THREE.Mesh(shadowGeometry, shadowMaterial);
   shadow.rotation.x = -Math.PI / 2; // 바닥에 눕힌다
   shadow.position.y = 0.0005; // 바닥과 겹쳐 z-fighting이 나지 않게
   shadow.renderOrder = -1; // 몸보다 먼저
@@ -401,13 +449,6 @@ function makeContactShadow(): THREE.Mesh {
 // ---------------------------------------------------------------------------
 
 export function makeRoach(): Roach {
-  // 바퀴벌레는 반드르르하다. 거친 재질로 두면 플라스틱 장난감처럼 보인다.
-  // roughness를 낮춰 directional light의 하이라이트가 또렷하게 맺히게 한다 —
-  // 멀리서도 '젖은 듯한 광택'이 먼저 읽힌다.
-  const shell = new THREE.MeshStandardMaterial({ color: 0x3a2416, roughness: 0.3 });
-  const wingShell = new THREE.MeshStandardMaterial({ color: 0x2b190d, roughness: 0.22 });
-  const limb = new THREE.MeshStandardMaterial({ color: 0x241509, roughness: 0.6 });
-  const eye = new THREE.MeshStandardMaterial({ color: 0x0b0806, roughness: 0.15 });
 
   // root는 미터 단위로 돌아다니고, model이 바퀴 단위를 미터로 줄인다.
   // 둘을 나눠 두면 '땅 위의 위치'와 '몸의 모양'이 섞이지 않는다.
@@ -448,7 +489,7 @@ export function makeRoach(): Roach {
       // 종아리 가시. 실제 바퀴벌레 다리는 억센 가시로 덮여 있고, 가까이서
       // 보면 이게 '벌레'라는 인상의 큰 부분을 차지한다. 뒤·아래로 눕혀 둔다.
       for (let k = 0; k < 3; k += 1) {
-        const spine = new THREE.Mesh(new THREE.ConeGeometry(0.011, 0.055, 4), limb);
+        const spine = new THREE.Mesh(shared('spine', () => new THREE.ConeGeometry(0.011, 0.055, 4)), limb);
         // ConeGeometry는 +Y로 선다. 눕혀서 마디 뒤쪽을 향하게 한다.
         spine.rotation.z = Math.PI * 0.5 + 0.5;
         spine.rotation.x = (k % 2 === 0 ? 1 : -1) * 0.6;

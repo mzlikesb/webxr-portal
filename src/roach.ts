@@ -187,6 +187,11 @@ export interface Roach {
    * 면마다 크기가 다르므로 밖에서 정한다.
    */
   setBounds(centerZ: number, radius: number): void;
+  /**
+   * 이 로컬 z보다 뒤로는 가지 못한다. 면이 선으로 끝날 때 쓴다 —
+   * 벽면의 위쪽은 벽이 아니라 포털 구멍이다. null이면 제한 없음.
+   */
+  setBackLimit(z: number | null): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +532,8 @@ export function makeRoach(): Roach {
   /** 활동 범위. 면마다 다르다 — 복도 바닥은 좁고 벽면은 바닥까지 길다. */
   let boundCenterZ = 0;
   let boundRadius = WANDER_RADIUS;
+  /** 이 z보다 뒤로는 못 간다. 원과 달리 '선'이라, 면이 선으로 끝날 때 쓴다. */
+  let backLimit: number | null = null;
   /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
   let edgeSide = Math.random() < 0.5 ? 1 : -1;
   /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
@@ -767,6 +774,12 @@ export function makeRoach(): Roach {
         // 범위를 벗어났다. 중심 쪽으로 되돌린다.
         const home = Math.atan2(-root.position.x, -offsetZ);
         heading += wrapAngle(home - heading) * Math.min(1, dt * 2);
+      }
+
+      // 뒤쪽 한계선. 원과 달리 방향이 하나뿐이라 따로 본다. 이 선 너머는
+      // 면이 아니라 허공이다(벽면이라면 포털 구멍).
+      if (backLimit !== null && root.position.z < backLimit) {
+        heading += wrapAngle(0 - heading) * Math.min(1, dt * 4); // 앞(+Z)으로
       }
     }
 
@@ -1021,6 +1034,9 @@ export function makeRoach(): Roach {
     setBounds(centerZ, radius) {
       boundCenterZ = centerZ;
       boundRadius = radius;
+    },
+    setBackLimit(z) {
+      backLimit = z;
     },
   };
 }

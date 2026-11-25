@@ -32,6 +32,8 @@ export interface WalkSurface {
   /** 돌아다닐 범위. 면의 로컬 XZ에서 (0, boundCenterZ)를 중심으로 한 원. */
   boundCenterZ: number;
   boundRadius: number;
+  /** 이 z보다 뒤로는 면이 없다. null이면 원만으로 충분하다. */
+  backLimitZ: number | null;
 }
 
 const normalAxis = new THREE.Vector3();
@@ -66,7 +68,15 @@ export function orientSurface(
 export function makeWalkSurface(parent: THREE.Object3D): WalkSurface {
   const node = new THREE.Group();
   parent.add(node);
-  return { node, exitZ: null, next: null, drift: null, boundCenterZ: 0, boundRadius: 0.12 };
+  return {
+    node,
+    exitZ: null,
+    next: null,
+    drift: null,
+    boundCenterZ: 0,
+    boundRadius: 0.12,
+    backLimitZ: null,
+  };
 }
 
 export interface Walker {
@@ -82,6 +92,7 @@ export interface Walker {
   setExitZ(z: number | null): void;
   setDrift(newHeading: number | null): void;
   setBounds(centerZ: number, radius: number): void;
+  setBackLimit(z: number | null): void;
 }
 
 const fromWorld = new THREE.Quaternion();
@@ -110,5 +121,6 @@ export function transferIfCrossed(walker: Walker, current: WalkSurface): WalkSur
   walker.setExitZ(next.exitZ);
   walker.setDrift(next.drift);
   walker.setBounds(next.boundCenterZ, next.boundRadius);
+  walker.setBackLimit(next.backLimitZ);
   return next;
 }

@@ -657,6 +657,7 @@ function resetRoach(): void {
   roach.setExitZ(corridorFloor.exitZ);
   roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
   roach.setDrift(corridorFloor.drift);
+  roach.setBackLimit(corridorFloor.backLimitZ);
 }
 
 function beginEmerging(): void {
@@ -705,9 +706,11 @@ function layOutSurfaces(): void {
   // 포털을 아주 낮게 걸면 내려갈 벽이 없다. 그때는 출구를 없앤다.
   const dropHeight = sill.y;
   wallFace.exitZ = dropHeight > 0.05 ? dropHeight : null;
-  // 아래턱 위로는 구멍이 뚫려 있으니 조금만 올라가게 하고, 아래로는 바닥까지.
   wallFace.boundCenterZ = dropHeight / 2;
   wallFace.boundRadius = dropHeight / 2 + 0.12;
+  // 아래턱 위는 벽이 아니라 구멍이다. 넘어가면 바퀴가 구멍 앞 허공을 걷는다.
+  // 원만으로 막으려면 아래턱 근처에서 활동 폭이 0이 되므로, 선으로 따로 막는다.
+  wallFace.backLimitZ = 0;
 
   for (const surface of [corridorFloor, wallFace, roomFloor]) {
     surface.node.updateMatrixWorld();

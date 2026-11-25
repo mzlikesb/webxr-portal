@@ -133,6 +133,15 @@ export function makePortalCrossing(
     },
 
     sync() {
+      // 원본이 다른 면으로 옮겨 갔으면 복제본도 따라간다.
+      //
+      // copyTransforms는 '로컬' 변환만 옮긴다. 부모가 어긋나 있으면 복제본은
+      // 엉뚱한 면 위에서 똑같은 자세로 움직인다 — 바퀴가 벽을 타고 내려가는
+      // 동안 복제본만 복도 바닥에 남아 걸어 다녔다.
+      if (outside.parent !== null && inside.parent !== outside.parent) {
+        outside.parent.add(inside);
+      }
+
       copyTransforms(outside, inside);
       // copyTransforms가 visible까지 옮기므로 그 뒤에 덮어써야 한다.
       // 포털이 없으면 안쪽 복사본은 그릴 이유가 없다.

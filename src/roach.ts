@@ -38,8 +38,16 @@ const FEMUR_PITCH = 0.9;
 /** 발을 들어 올리는 높이(몸 공간). */
 const STEP_HEIGHT = 0.1;
 
-/** 가장 빠를 때의 속도(m/s). 걸음새 세기를 이 값으로 정규화한다. */
-const MAX_SPEED = 0.26;
+/**
+ * 가장 빠를 때의 속도(m/s). 걸음새 세기를 이 값으로 정규화한다.
+ *
+ * 임의로 고른 값이 아니라 다리 기하에서 나온 상한이다. 보폭은 0.34 몸길이를
+ * 넘을 수 없고(넘으면 디딤 끝에서 발이 다리 길이 밖으로 나가 끌린다),
+ * 속도 = 보폭 × 주기 / π 이므로 주기 120 rad/s(19Hz)에서 0.5 m/s가 된다.
+ * 몸길이의 12배/초다. 진짜 바퀴벌레는 20~50배까지 내지만 거기까지 가려면
+ * 다리가 더 길어야 한다.
+ */
+const MAX_SPEED = 0.5;
 
 /** 몸 중심에서 발까지의 대략적인 거리(m). 회전을 걸음으로 환산할 때 쓴다. */
 const FOOT_RADIUS = 0.022;
@@ -50,7 +58,9 @@ const FOOT_RADIUS = 0.022;
  * 상한은 다리가 닿는 범위에서 나온 값이다. 이보다 크게 잡으면 디딤 끝에서
  * 발이 다리 길이를 넘어가고, IK가 자르면서 발이 끌린다.
  */
-const MIN_STRIDE = 0.12;
+// 느린 걸음에서도 보폭이 크게 줄지는 않는다 — 곤충은 보폭보다 주기로 속도를
+// 조절한다. 아주 느릴 때만 종종걸음이 된다.
+const MIN_STRIDE = 0.26;
 const MAX_STRIDE = 0.34;
 
 /** 이 거리 안에서 위협이 다가오면 놀란다(m). */
@@ -664,24 +674,24 @@ export function makeRoach(): Roach {
       if (targetSpeed > 0) {
         targetSpeed = 0; // 멈춤
         turnRate = 0; // 몸만 계속 도는 일이 없게. 멈추면 완전히 멈춘다.
-        timer = rand(0.4, 1.8);
+        timer = rand(0.3, 1.2);
 
         // 멈춘 김에 종종 더듬이를 닦는다. 바퀴벌레는 멈춰 있는 동안 정말로
         // 가만히 있지 않는다. 우리 바퀴는 시간의 대부분을 서서 보내므로,
         // 그 시간이 비어 있으면 '멈춘 모형'으로 보인다.
-        if (Math.random() < 0.4) {
+        if (Math.random() < 0.25) {
           state = 'groom';
-          stateTimer = rand(1.5, 3.5);
+          stateTimer = rand(1.2, 2.5);
           groomSide = Math.random() < 0.5 ? 1 : -1;
           groomT = 0;
         }
-      } else if (Math.random() < 0.18) {
-        targetSpeed = rand(0.18, MAX_SPEED); // 가끔 확 달린다
-        timer = rand(0.25, 0.5);
+      } else if (Math.random() < 0.3) {
+        targetSpeed = rand(0.32, MAX_SPEED); // 가끔 확 달린다
+        timer = rand(0.3, 0.8);
         turnRate = rand(-0.5, 0.5); // 달릴 때는 거의 직진
       } else {
-        targetSpeed = rand(0.03, 0.08); // 평소엔 느릿느릿
-        timer = rand(0.6, 2.2);
+        targetSpeed = rand(0.1, 0.2); // 평소 걸음. 몸길이의 2~5배/초
+        timer = rand(0.5, 1.5);
         turnRate = rand(-1.2, 1.2);
       }
     }
@@ -813,12 +823,16 @@ export function makeRoach(): Roach {
     // 넘어서 발이 끌렸다. 보폭을 먼저 정하고 주기를 맞추면 둘 다 해결된다.
     const strideUnits = MIN_STRIDE + (MAX_STRIDE - MIN_STRIDE) * speedNorm;
     const anySwinging = legs.some((leg) => leg.swinging);
-    const phaseRate =
+    const wantedRate =
       gaitSpeed > 0.001
         ? (Math.PI * gaitSpeed) / (strideUnits * ROACH_LENGTH)
         : anySwinging
           ? 9
           : 0;
+
+    // 한 프레임에 위상이 π를 넘으면 디딤/뗌 판정이 반주기를 통째로 건너뛴다.
+    // 평소엔 걸릴 일이 없지만 프레임이 한 번 끊기면 바로 걸린다. 잘라 둔다.
+    const phaseRate = Math.min(wantedRate, 2.5 / dt);
     phase += dt * phaseRate;
 
     // 발을 앞으로 내놓을 거리. 주기는 회전까지 포함한 gaitSpeed로 정했지만,

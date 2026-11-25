@@ -628,6 +628,51 @@ corridorFloor.boundRadius = 0.2;
 roomFloor.boundCenterZ = 0.25;
 roomFloor.boundRadius = 0.4;
 
+// ── 기다렸다 나오기 ──
+//
+// 바퀴를 처음부터 걸어 나오게 하면, 보는 사람이 포털을 쳐다보고 있든 말든
+// 그냥 일어나 버린다. 안쪽 깊은 데서 어슬렁거리다가 사람이 다가왔을 때
+// 나오게 하면, 같은 코드로 '우연히 일어난 일'이 '일어나는 순간'이 된다.
+//
+// 구멍으로 안쪽을 들여다보면 뭔가 움직이는 게 먼저 보이고, 그 다음에 나온다.
+const LURK_CENTER_Z = -0.55; // 구멍에서 이만큼 안쪽을 서성인다
+const LURK_RADIUS = 0.3;
+/** 보는 사람이 포털에 이만큼 가까워지면 나오기 시작한다(m). */
+const EMERGE_DISTANCE = 1.0;
+
+let hasEmerged = false;
+
+function beginLurking(): void {
+  hasEmerged = false;
+  corridorFloor.boundCenterZ = LURK_CENTER_Z;
+  corridorFloor.boundRadius = LURK_RADIUS;
+  corridorFloor.drift = null; // 목적 없이 서성인다
+}
+
+/** 바퀴를 복도 깊은 곳으로 되돌린다. 세션을 새로 시작할 때마다 부른다. */
+function resetRoach(): void {
+  beginLurking();
+  currentSurface = corridorFloor;
+  roach.placeOn(corridorFloor.node, 0, LURK_CENTER_Z, 0);
+  roach.setExitZ(corridorFloor.exitZ);
+  roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
+  roach.setDrift(corridorFloor.drift);
+}
+
+function beginEmerging(): void {
+  if (hasEmerged) return;
+  hasEmerged = true;
+  corridorFloor.boundCenterZ = -0.12;
+  corridorFloor.boundRadius = 0.2;
+  corridorFloor.drift = 0; // 구멍 밖으로
+  // 면의 설정을 바꿨으니 지금 그 면에 서 있는 바퀴에게도 알려 줘야 한다.
+  roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
+  roach.setDrift(corridorFloor.drift);
+  log('바퀴가 나오기 시작했다');
+}
+
+beginLurking();
+
 /** 두 면을 포털 자리에 맞춰 세운다. 포털을 옮기면 다시 부른다. */
 function layOutSurfaces(): void {
   portalNormal.set(0, 0, 1).applyQuaternion(portal.quaternion);
@@ -689,7 +734,7 @@ const roach = makeRoach();
 
 /** 바퀴가 지금 올라서 있는 면. */
 let currentSurface: WalkSurface = corridorFloor;
-roach.placeOn(corridorFloor.node, 0, -0.1, 0); // 구멍 안쪽에서 시작, 밖을 보고
+roach.placeOn(corridorFloor.node, 0, LURK_CENTER_Z, 0); // 복도 깊은 곳에서 시작
 roach.setExitZ(corridorFloor.exitZ);
 roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
 // 복도 바닥에서는 구멍 밖(+Z)으로 나가려 한다. 이 작품에서 바퀴는 포털에서
@@ -719,7 +764,10 @@ const viewerPosition = new THREE.Vector3();
 // 데스크톱에서 놀라는 걸 확인하려면 누를 데가 있어야 한다. 미리보기 카메라는
 // 가만히 있어서 '다가옴'이 영영 일어나지 않는다. 임시.
 renderer.domElement.addEventListener('pointerdown', () => {
-  roach.scare(viewerPosition.x, viewerPosition.z);
+  // 미리보기 카메라는 움직이지 않아서 '다가옴'이 일어나지 않는다.
+  // 첫 클릭은 바퀴를 불러내고, 그 뒤로는 놀래킨다.
+  if (!hasEmerged) beginEmerging();
+  else roach.scare(viewerPosition.x, viewerPosition.z);
 });
 
 /** 걸음새를 눈으로 맞추려고 둔 임시 슬라이더. 바퀴가 스스로 고른 속도에 곱한다. */
@@ -746,6 +794,12 @@ renderer.setAnimationLoop((time, frame) => {
   // 머리 포즈가, 밖에서는 미리보기 카메라가 출처다.
   const viewer = frame === undefined ? camera : renderer.xr.getCamera();
   viewer.getWorldPosition(viewerPosition);
+
+  // 아직 복도에 있고 사람이 다가왔으면, 이제 나온다.
+  if (!hasEmerged && portalPlaced && currentSurface === corridorFloor) {
+    if (viewerPosition.distanceTo(portal.position) < EMERGE_DISTANCE) beginEmerging();
+  }
+
   currentSurface.node.worldToLocal(viewerPosition);
 
   roach.update(dt, speedSlider === null ? 1 : Number(speedSlider.value), viewerPosition);
@@ -825,6 +879,8 @@ async function startSession(): Promise<void> {
 
   // 미리보기용으로 놓아 둔 가짜 포털을 지우고, 이 세션에서 다시 고르게 한다.
   resetPortal();
+  // 바퀴도 복도 안으로 되돌린다. 세션마다 처음부터 시작해야 한다.
+  resetRoach();
 
   log('세션 시작');
   // ①단계의 실제 목적: Quest 3가 뭘 허락했는지 눈으로 확인하는 것.

@@ -207,6 +207,11 @@ export interface Roach {
    *   구멍 폭 안이면 복도로 되돌아갈 수 있고, 그 밖은 그냥 벽이다.
    */
   setBackLimit(z: number | null, halfWidth: number): void;
+  /**
+   * 가장자리에 몸을 붙이고 따라갈지. 머물며 살피는 면에서만 켠다.
+   * 경계가 원인 면에서 켜 두면 둘레를 도는 회전목마가 된다.
+   */
+  setHugEdges(on: boolean): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,6 +592,8 @@ export function makeRoach(): Roach {
   let backLimit: number | null = null;
   /** 그 선에 뚫려 있는 문의 반폭. 이 안쪽에서는 막지 않는다. */
   let backLimitGap = 0;
+  /** 가장자리를 따라갈지. 면이 정한다. */
+  let hugEdges = false;
   /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
   let edgeSide = Math.random() < 0.5 ? 1 : -1;
   /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
@@ -820,13 +827,13 @@ export function makeRoach(): Roach {
       // 조향을 놓아 줘서, 걸어 나갈 수 있게 한다.
       const atExit = exitZ !== null && root.position.z > exitZ - EDGE_BAND * 2;
 
-      // 주촉성은 '머무르며 살피는' 면의 행동이다. 가고 싶은 방향이 정해진
-      // 면(복도 바닥, 벽면)에서는 끈다. 안 그러면 경계 원을 따라 빙빙 돌기만
-      // 하고 목적지에 영영 닿지 않는다. 그때 경계는 '넘어가면 되돌리는'
-      // 최후의 선으로만 남는다.
-      const exploring = driftHeading === null;
-
-      if (exploring && gap < EDGE_BAND && !atExit) {
+      // 주촉성은 '머무르며 살피는' 면의 행동이고, 그런 면에서만 켠다.
+      //
+      // 경계가 원인 면에서 켜 두면 여럿이 전부 그 둘레로 모여 같은 방향으로
+      // 도는 회전목마가 된다. 지나가는 면(복도 바닥, 벽면)에서도 마찬가지로,
+      // 둘레만 돌다가 목적지에 영영 닿지 않는다.
+      // 꺼 두면 경계는 '넘어가면 되돌리는' 최후의 선으로만 남는다.
+      if (hugEdges && gap < EDGE_BAND && !atExit) {
         // 접선. edgeSide가 도는 방향을 정한다.
         const tx = -nz * edgeSide;
         const tz = nx * edgeSide;
@@ -1127,6 +1134,9 @@ export function makeRoach(): Roach {
     setBackLimit(z, halfWidth) {
       backLimit = z;
       backLimitGap = halfWidth;
+    },
+    setHugEdges(on) {
+      hugEdges = on;
     },
   };
 }

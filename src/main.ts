@@ -634,8 +634,9 @@ roomFloor.backHalfWidth = 2;
 corridorFloor.drift = 0;
 wallFace.drift = 0;
 // 방 바닥에는 목적지가 없다. 여기서부터는 주촉성으로 가장자리를 살피며
-// 돌아다닌다 — 나온 뒤의 행동이다.
+// 돌아다닌다 — 나온 뒤의 행동이다. 가장자리를 따라가는 건 여기서만 켠다.
 roomFloor.drift = null;
+roomFloor.hugEdges = true;
 
 // 돌아다닐 범위. 면마다 모양이 달라서 따로 준다.
 // 복도 바닥은 구멍 안쪽으로 좁게, 방 바닥은 넓게.
@@ -655,8 +656,17 @@ const LURK_CENTER_Z = -0.55; // 구멍에서 이만큼 안쪽을 서성인다
 // 복도 안쪽 반폭이 PORTAL_WIDTH/2 + 0.1이다. 여덟 마리가 한 원에 몰리지
 // 않도록 그 안에서 최대한 넓게 잡는다.
 const LURK_RADIUS = 0.35;
-/** 보는 사람이 포털에 이만큼 가까워지면 나오기 시작한다(m). */
-const EMERGE_DISTANCE = 1.0;
+/**
+ * 등장 조건.
+ *
+ * 처음에는 '1m 안으로 다가오면'이었는데, 0.6m짜리 포털을 1m 앞에서 들여다볼
+ * 일이 없다. 조건이 영영 안 걸려서 바퀴들이 복도 안에서만 맴돌았다.
+ *
+ * 거리보다 '쳐다보는가'가 맞다. 작품으로도 그쪽이다 — 알아챘을 때 나온다.
+ */
+const EMERGE_DISTANCE = 2.5;
+/** 시선과 포털 방향 사이가 이 각도 안이면 보고 있는 것으로 친다(라디안). */
+const EMERGE_VIEW_ANGLE = 0.7; // 약 40°
 
 let hasEmerged = false;
 
@@ -695,6 +705,7 @@ function applySurface(unit: RoachUnit): void {
   unit.roach.setBounds(unit.surface.boundCenterZ, unit.surface.boundRadius);
   unit.roach.setDrift(unit.surface.drift);
   unit.roach.setBackLimit(unit.surface.backLimitZ, unit.surface.backHalfWidth);
+  unit.roach.setHugEdges(unit.surface.hugEdges);
 }
 
 function beginEmerging(): void {
@@ -806,6 +817,7 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
   roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
   roach.setDrift(corridorFloor.drift);
   roach.setBackLimit(corridorFloor.backLimitZ, corridorFloor.backHalfWidth);
+  roach.setHugEdges(corridorFloor.hugEdges);
 
   // 바퀴를 두 벌로 나눈다. roach.root는 '바깥 복사본'이 되고, 같은 자세를
   // 따라가는 '안쪽 복사본'이 옆에 생긴다.
@@ -828,12 +840,14 @@ layOutSurfaces();
 
 // 미리보기 카메라를 포털 아래턱 가까이 가져간다. 바퀴가 4cm라 멀리서는 점이고,
 // 모서리를 넘는 순간을 봐야 한다. 세션에서는 이 값이 헤드셋 포즈에 덮인다. 임시.
-camera.position.set(0, 1.0, -0.25);
-camera.lookAt(0, 0.4, -1.3);
+camera.position.set(0, 1.15, -0.35);
+camera.lookAt(0, 0.95, -1.3); // 포털을 정면으로 — 시선 조건도 같이 보려고
 
 const viewerPosition = new THREE.Vector3();
 /** 위 값을 면 로컬로 옮긴 것. 마리마다 면이 달라 매번 다시 만든다. */
 const viewerLocal = new THREE.Vector3();
+const viewerForward = new THREE.Vector3();
+const toPortal = new THREE.Vector3();
 
 // 데스크톱에서 놀라는 걸 확인하려면 누를 데가 있어야 한다. 미리보기 카메라는
 // 가만히 있어서 '다가옴'이 영영 일어나지 않는다. 임시.
@@ -870,9 +884,15 @@ renderer.setAnimationLoop((time, frame) => {
   const viewer = frame === undefined ? camera : renderer.xr.getCamera();
   viewer.getWorldPosition(viewerPosition);
 
-  // 아직 복도에 있고 사람이 다가왔으면, 이제 나온다.
+  // 아직 복도에 있고, 사람이 가까이서 포털 쪽을 보고 있으면 이제 나온다.
   if (!hasEmerged && portalPlaced) {
-    if (viewerPosition.distanceTo(portal.position) < EMERGE_DISTANCE) beginEmerging();
+    toPortal.subVectors(portal.position, viewerPosition);
+    const distance = toPortal.length();
+    if (distance < EMERGE_DISTANCE && distance > 1e-3) {
+      viewer.getWorldDirection(viewerForward);
+      const angle = viewerForward.angleTo(toPortal.divideScalar(distance));
+      if (angle < EMERGE_VIEW_ANGLE) beginEmerging();
+    }
   }
 
   const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);

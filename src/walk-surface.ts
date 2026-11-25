@@ -31,6 +31,8 @@ export interface WalkSurface {
   prev: WalkSurface | null;
   /** 되돌아가는 모서리가 실제로 뚫려 있는 반폭. 그 밖은 막힌 벽이다. */
   backHalfWidth: number;
+  /** 가장자리에 붙어 다닐지. 머물며 살피는 면에서만 켠다. */
+  hugEdges: boolean;
   /** 이 면 위에서 가고 싶어 하는 방향(heading). null이면 목적 없이 방황. */
   drift: number | null;
   /** 돌아다닐 범위. 면의 로컬 XZ에서 (0, boundCenterZ)를 중심으로 한 원. */
@@ -78,6 +80,7 @@ export function makeWalkSurface(parent: THREE.Object3D): WalkSurface {
     next: null,
     prev: null,
     backHalfWidth: 0,
+    hugEdges: false,
     drift: null,
     boundCenterZ: 0,
     boundRadius: 0.12,
@@ -99,6 +102,7 @@ export interface Walker {
   setDrift(newHeading: number | null): void;
   setBounds(centerZ: number, radius: number): void;
   setBackLimit(z: number | null, halfWidth: number): void;
+  setHugEdges(on: boolean): void;
 }
 
 const fromWorld = new THREE.Quaternion();
@@ -124,6 +128,7 @@ function moveTo(
   walker.setDrift(drift);
   walker.setBounds(to.boundCenterZ, to.boundRadius);
   walker.setBackLimit(to.backLimitZ, to.backHalfWidth);
+  walker.setHugEdges(to.hugEdges);
   return to;
 }
 

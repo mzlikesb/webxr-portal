@@ -68,10 +68,21 @@ export function makeWalkSurface(parent: THREE.Object3D): WalkSurface {
 
 export interface Walker {
   root: THREE.Object3D;
-  placeOn(parent: THREE.Object3D, x: number, z: number, newHeading: number): void;
+  placeOn(
+    parent: THREE.Object3D,
+    x: number,
+    z: number,
+    newHeading: number,
+    fromPose?: THREE.Quaternion,
+  ): void;
+  getHeading(): number;
   setExitZ(z: number | null): void;
   setDrift(newHeading: number | null): void;
 }
+
+const fromWorld = new THREE.Quaternion();
+const toWorld = new THREE.Quaternion();
+const relativePose = new THREE.Quaternion();
 
 /**
  * 모서리를 넘었으면 다음 면으로 옮기고 그 면을 돌려준다.
@@ -82,10 +93,16 @@ export function transferIfCrossed(walker: Walker, current: WalkSurface): WalkSur
   if (exitZ === null || next === null) return current;
   if (walker.root.position.z <= exitZ) return current;
 
+  // 새 면에서 본 옛 면의 자세. 몸이 여기서부터 녹아 새 면에 눕는다.
+  // 두 면의 '차이'만 담기므로 heading은 섞이지 않는다.
+  current.node.getWorldQuaternion(fromWorld);
+  next.node.getWorldQuaternion(toWorld);
+  relativePose.copy(toWorld).invert().multiply(fromWorld);
+
   // 규칙 덕분에 x와 heading을 그대로 넘긴다. z만 새 면의 시작으로 되돌린다.
   // 0이 아니라 살짝 안쪽에 놓는 건, 모서리에 정확히 걸쳐 두면 다음 프레임에
   // 다시 넘어간 것으로 보일 수 있어서다.
-  walker.placeOn(next.node, walker.root.position.x, 0.002, walker.root.rotation.y);
+  walker.placeOn(next.node, walker.root.position.x, 0.002, walker.getHeading(), relativePose);
   walker.setExitZ(next.exitZ);
   walker.setDrift(next.drift);
   return next;

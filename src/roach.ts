@@ -68,6 +68,8 @@ const EDGE_BAND = 0.035;
 /** 벽을 따라갈 때 유지하려는 간격(m). */
 const EDGE_HUG = 0.012;
 
+const IDENTITY = new THREE.Quaternion();
+
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 const rand = (lo: number, hi: number): number => lo + Math.random() * (hi - lo);
 /** 각도를 -π~π로 접는다. 두 각의 차를 다룰 때 필요하다. */
@@ -151,7 +153,15 @@ export interface Roach {
    * 다른 면으로 옮겨 놓는다. 모서리를 넘을 때 쓴다.
    * 위치와 방향은 모두 새 면의 로컬 기준이고, 발은 거기서 새로 디딘다.
    */
-  placeOn(parent: THREE.Object3D, x: number, z: number, newHeading: number): void;
+  placeOn(
+    parent: THREE.Object3D,
+    x: number,
+    z: number,
+    newHeading: number,
+    fromPose?: THREE.Quaternion,
+  ): void;
+  /** 지금 향하고 있는 방향. 면을 넘길 때 그대로 넘겨준다. */
+  getHeading(): number;
   /**
    * 이 로컬 z 너머는 '나가는 문'이라 경계 조향을 하지 않는다.
    * null이면 사방이 막힌 면이다.
@@ -520,6 +530,40 @@ export function makeRoach(): Roach {
 
   const angles: JointAngles = { femurAngle: 0, kneeAngle: 0 };
 
+  // ── 모서리를 넘는 동안의 몸 자세 ──
+  //
+  // 발은 새 면에 먼저 디디고, 몸은 모서리를 중심으로 돌아서 따라온다.
+  // 실제 곤충이 그렇게 넘어간다. 발이 이미 새 면에 박혀 있으므로 미끄러지지
+  // 않고, 몸이 돌아가는 동안 다리가 늘어나며 모서리를 걸친다.
+  //
+  // pivot은 '아직 남아 있는 옛 면의 자세'다. 전환 순간 옛 면의 상대 자세로
+  // 시작해서 0으로 녹는다.
+  const pivot = new THREE.Quaternion();
+  /** 전환이 시작될 때의 상대 자세. 매 프레임 여기서부터 절대 보간한다. */
+  const pivotStart = new THREE.Quaternion();
+  const headingQuat = new THREE.Quaternion();
+  const inverseBody = new THREE.Quaternion();
+  const footDelta = new THREE.Vector3();
+  const Y_AXIS = new THREE.Vector3(0, 1, 0);
+  let pivotLeft = 0; // 남은 전환 시간(초)
+
+  const TRANSITION_TIME = 0.25;
+
+  /** heading과 전환 회전을 합쳐 root의 자세를 만든다. */
+  function applyPose(dt: number): void {
+    if (pivotLeft > 0) {
+      pivotLeft = Math.max(0, pivotLeft - dt);
+      // 매번 '시작 자세에서 얼마나 왔는지'로 절대 보간한다. 직전 값에서
+      // 조금씩 더 slerp하면 프레임레이트에 따라 수렴 속도가 달라진다.
+      const done = 1 - pivotLeft / TRANSITION_TIME;
+      pivot.copy(pivotStart).slerp(IDENTITY, done * done * (3 - 2 * done));
+    }
+
+    headingQuat.setFromAxisAngle(Y_AXIS, heading);
+    // 면 안에서 heading으로 돌린 뒤, 모서리를 중심으로 남은 만큼 더 돌린다.
+    root.quaternion.copy(pivot).multiply(headingQuat);
+  }
+
   /** 몸 공간의 한 점을 땅 공간으로. root의 회전은 Y축뿐이라 손으로 푼다. */
   function toGroundX(bx: number, bz: number): number {
     return root.position.x + (Math.cos(heading) * bx + Math.sin(heading) * bz) * ROACH_LENGTH;
@@ -703,7 +747,6 @@ export function makeRoach(): Roach {
 
     root.position.x += Math.sin(heading) * speed * dt;
     root.position.z += Math.cos(heading) * speed * dt;
-    root.rotation.y = heading;
   }
 
   function senseThreat(dt: number, threat: THREE.Vector3 | null): void {
@@ -727,6 +770,8 @@ export function makeRoach(): Roach {
     senseThreat(dt, threat);
     behave(dt);
     move(dt);
+    applyPose(dt);
+    inverseBody.copy(root.quaternion).invert();
 
     // 제자리에서 돌기만 해도 발은 옮겨 디뎌야 한다. 몸 중심에서 발까지가
     // 대략 FOOT_RADIUS이므로, 각속도에 그걸 곱하면 발이 도는 속도가 나온다.
@@ -811,16 +856,19 @@ export function makeRoach(): Roach {
       }
 
       // ── 땅 공간의 발 자국 → 몸 공간 → 관절 각도 ──
-      const dx = leg.footX - root.position.x;
-      const dz = leg.footZ - root.position.z;
-      const c = Math.cos(heading);
-      const s = Math.sin(heading);
-      // root 회전의 역변환. 그리고 미터를 바퀴 단위로 되돌린다.
-      const bx = (c * dx - s * dz) / ROACH_LENGTH;
-      const bz = (s * dx + c * dz) / ROACH_LENGTH;
+      //
+      // 예전에는 heading의 sin/cos으로 2D 역회전만 했다. 모서리를 넘는 동안
+      // 몸이 땅과 어긋난 자세로 돌아가므로 더 이상 그럴 수 없다. root의 자세
+      // 전체의 역을 쓴다. 발을 들어 올린 높이도 땅의 법선 방향이라 같이 넣는다.
+      footDelta.set(
+        leg.footX - root.position.x,
+        leg.footLift * ROACH_LENGTH,
+        leg.footZ - root.position.z,
+      );
+      footDelta.applyQuaternion(inverseBody).divideScalar(ROACH_LENGTH);
 
-      const vx = bx - leg.hipX;
-      const vz = bz - leg.spec.z;
+      const vx = footDelta.x - leg.hipX;
+      const vz = footDelta.z - leg.spec.z;
 
       // 다리가 놓인 평면의 방향. Y 회전 a는 +X를 (cos a, 0, -sin a)로 보낸다.
       let yaw = Math.atan2(-vz, vx);
@@ -828,7 +876,7 @@ export function makeRoach(): Roach {
       yaw = leg.restYaw + clamp(wrapAngle(yaw - leg.restYaw), -0.8, 0.8);
       leg.hip.rotation.y = yaw;
 
-      solveLeg(leg.spec, Math.hypot(vx, vz), leg.footLift - HIP_Y, angles);
+      solveLeg(leg.spec, Math.hypot(vx, vz), footDelta.y - HIP_Y, angles);
       leg.femur.rotation.z = angles.femurAngle;
       leg.knee.rotation.z = angles.kneeAngle;
 
@@ -889,12 +937,30 @@ export function makeRoach(): Roach {
     }
   }
 
-  function placeOn(parent: THREE.Object3D, x: number, z: number, newHeading: number): void {
+  function placeOn(
+    parent: THREE.Object3D,
+    x: number,
+    z: number,
+    newHeading: number,
+    fromPose?: THREE.Quaternion,
+  ): void {
     if (root.parent !== parent) parent.add(root); // add가 이전 부모에서 떼어낸다
 
     root.position.set(x, 0, z);
     heading = newHeading;
-    root.rotation.y = heading;
+
+    if (fromPose === undefined) {
+      pivotLeft = 0;
+      pivot.identity();
+    } else {
+      // 새 면 기준으로 본 옛 면의 자세. 여기서 0으로 녹는다.
+      pivotStart.copy(fromPose);
+      pivot.copy(fromPose);
+      pivotLeft = TRANSITION_TIME;
+    }
+
+    applyPose(0);
+    inverseBody.copy(root.quaternion).invert();
     root.updateMatrixWorld();
 
     // 발 자국은 이전 면의 좌표였다. 새 면에서 다시 디딘다.
@@ -910,6 +976,9 @@ export function makeRoach(): Roach {
     update,
     scare,
     placeOn,
+    getHeading() {
+      return heading;
+    },
     setExitZ(z) {
       exitZ = z;
     },

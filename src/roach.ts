@@ -200,20 +200,17 @@ export interface Roach {
    */
   setDrift(newHeading: number | null): void;
   /**
-   * 돌아다닐 수 있는 범위. 면의 로컬 XZ에서 (0, centerZ)를 중심으로 한 원이다.
-   * 면마다 크기가 다르므로 밖에서 정한다.
-   */
-  setBounds(centerZ: number, radius: number): void;
-  /**
-   * 이 로컬 z보다 뒤로는 가지 못한다. 면이 선으로 끝날 때 쓴다.
+   * 돌아다닐 수 있는 범위. 면의 로컬 XZ에서 축에 정렬된 사각형이다.
+   * x는 ±halfX, z는 centerZ ± halfZ. 면마다 다르므로 밖에서 정한다.
    *
-   * @param halfWidth 이 반폭 안쪽에서는 막지 않는다. 벽면 위쪽이 그렇다 —
-   *   구멍 폭 안이면 복도로 되돌아갈 수 있고, 그 밖은 그냥 벽이다.
+   * @param gapHalfWidth -Z 변에 뚫려 있는 구멍의 반폭(x = 0 중심). 그 안쪽은
+   *   막지 않는다. 벽면 위쪽이 그렇다 — 포털 폭 안이면 복도로 되돌아갈 수
+   *   있고, 그 밖은 그냥 벽이다.
    */
-  setBackLimit(z: number | null, halfWidth: number): void;
+  setBounds(halfX: number, centerZ: number, halfZ: number, gapHalfWidth: number): void;
   /**
    * 가장자리에 몸을 붙이고 따라갈지. 머물며 살피는 면에서만 켠다.
-   * 경계가 원인 면에서 켜 두면 둘레를 도는 회전목마가 된다.
+   * 지나가는 면에서 켜 두면 둘레만 돌다가 목적지에 닿지 않는다.
    */
   setHugEdges(on: boolean): void;
 }
@@ -589,13 +586,12 @@ export function makeRoach(): Roach {
   let exitZ: number | null = null;
   /** 결국 가고 싶은 방향. 없으면 순수한 방황. */
   let driftHeading: number | null = null;
-  /** 활동 범위. 면마다 다르다 — 복도 바닥은 좁고 벽면은 바닥까지 길다. */
+  /** 활동 범위(사각형). 면마다 다르다 — 복도 바닥은 좁고 벽면은 바닥까지 길다. */
+  let boundHalfX = WANDER_RADIUS;
   let boundCenterZ = 0;
-  let boundRadius = WANDER_RADIUS;
-  /** 이 z보다 뒤로는 못 간다. 원과 달리 '선'이라, 면이 선으로 끝날 때 쓴다. */
-  let backLimit: number | null = null;
-  /** 그 선에 뚫려 있는 문의 반폭. 이 안쪽에서는 막지 않는다. */
-  let backLimitGap = 0;
+  let boundHalfZ = WANDER_RADIUS;
+  /** -Z 변에 뚫려 있는 구멍의 반폭. 이 안쪽에서는 막지 않는다. */
+  let boundGap = 0;
   /** 가장자리를 따라갈지. 면이 정한다. */
   let hugEdges = false;
   /** 벽을 어느 쪽으로 돌지. 한 번 정하면 한참 유지한다. */
@@ -818,28 +814,48 @@ export function makeRoach(): Roach {
     //
     // 벽 쪽으로 밀지도, 중앙으로 되돌리지도 않는다. 벽의 '접선' 방향을
     // 목표 삼고, 간격이 틀어진 만큼만 법선 성분을 섞는다.
-    const offsetZ = root.position.z - boundCenterZ;
-    const away = Math.hypot(root.position.x, offsetZ);
+    //
+    // ── 가장 가까운 변 하나만 '벽'으로 본다 ──
+    //
+    // 사각형에는 변이 넷이다. 넷을 한꺼번에 섞으면 구석에서 두 힘이 겹쳐
+    // 대각선으로 밀려 나간다. 실제로 벌레가 더듬는 벽도 한 번에 하나다.
+    // 그래서 넷 중 가장 가까운 변을 골라, 원일 때와 똑같이 처리한다.
+    //
+    // 구석에서는 고른 변이 바뀌면서 바깥 법선이 90° 꺾이는데, 조향에 속도
+    // 제한(dt * 7)이 걸려 있어 꺾이는 게 아니라 돌아 나간다. 접선이
+    // (-nz, nx) * edgeSide라 도는 방향(시계/반시계)도 저절로 이어진다.
     wallOnRight = 0;
 
     // 멈춰 있을 때는 조향하지 않는다. 안 그러면 벽 옆에 선 채로 각도만
     // 영원히 맞추느라 제자리에서 빙빙 돈다 — 멈춤이 멈춤이 아니게 된다.
-    if (state !== 'startle' && speed > 0.005 && away > 0.001) {
-      const gap = boundRadius - away; // 벽까지 남은 거리. 음수면 넘어갔다.
-      const nx = root.position.x / away; // 벽을 향하는 바깥 방향
-      const nz = offsetZ / away;
+    if (state !== 'startle' && speed > 0.005) {
+      const offsetZ = root.position.z - boundCenterZ;
 
       // 나가는 문 쪽은 막지 않는다. 벽을 따라가다가도 문 근처에 오면
       // 조향을 놓아 줘서, 걸어 나갈 수 있게 한다.
       const atExit = exitZ !== null && root.position.z > exitZ - EDGE_BAND * 2;
 
+      let gap = Infinity; // 가장 가까운 변까지 남은 거리. 음수면 넘어갔다.
+      let nx = 0; // 그 변의 바깥 방향
+      let nz = 0;
+      const consider = (distance: number, ox: number, oz: number): void => {
+        if (distance >= gap) return;
+        gap = distance;
+        nx = ox;
+        nz = oz;
+      };
+
+      consider(boundHalfX - root.position.x, 1, 0);
+      consider(boundHalfX + root.position.x, -1, 0);
+      // +Z 변이 나가는 문이면 아예 변으로 세지 않는다.
+      if (!atExit) consider(boundHalfZ - offsetZ, 0, 1);
+      // -Z 변에 구멍이 뚫려 있으면 그 폭 안에서는 변이 없다.
+      if (Math.abs(root.position.x) > boundGap) consider(boundHalfZ + offsetZ, 0, -1);
+
       // 주촉성은 '머무르며 살피는' 면의 행동이고, 그런 면에서만 켠다.
-      //
-      // 경계가 원인 면에서 켜 두면 여럿이 전부 그 둘레로 모여 같은 방향으로
-      // 도는 회전목마가 된다. 지나가는 면(복도 바닥, 벽면)에서도 마찬가지로,
-      // 둘레만 돌다가 목적지에 영영 닿지 않는다.
-      // 꺼 두면 경계는 '넘어가면 되돌리는' 최후의 선으로만 남는다.
-      if (hugEdges && gap < EDGE_BAND && !atExit) {
+      // 지나가는 면(복도 바닥, 벽면)에서 켜 두면 둘레만 돌다가 목적지에
+      // 영영 닿지 않는다. 꺼 두면 경계는 '넘어가면 되돌리는' 선으로만 남는다.
+      if (hugEdges && gap < EDGE_BAND) {
         // 접선. edgeSide가 도는 방향을 정한다.
         const tx = -nz * edgeSide;
         const tz = nx * edgeSide;
@@ -853,21 +869,10 @@ export function makeRoach(): Roach {
 
         // 가끔 도는 방향을 바꾼다. 늘 같은 쪽으로만 돌면 궤도처럼 보인다.
         if (Math.random() < dt * 0.15) edgeSide = -edgeSide;
-      } else if (gap < 0 && !atExit) {
-        // 범위를 벗어났다. 중심 쪽으로 되돌린다.
-        const home = Math.atan2(-root.position.x, -offsetZ);
+      } else if (gap < 0) {
+        // 변을 넘어갔다. 그 변의 안쪽으로 되돌린다.
+        const home = Math.atan2(-nx, -nz);
         heading += wrapAngle(home - heading) * Math.min(1, dt * 2);
-      }
-
-      // 뒤쪽 한계선. 원과 달리 방향이 하나뿐이라 따로 본다.
-      // 가운데가 뚫려 있을 수 있다 — 벽면의 위쪽은 구멍 폭 안에서는 복도로
-      // 이어지고, 그 밖은 그냥 벽이다.
-      if (
-        backLimit !== null &&
-        root.position.z < backLimit &&
-        Math.abs(root.position.x) > backLimitGap
-      ) {
-        heading += wrapAngle(0 - heading) * Math.min(1, dt * 4); // 앞(+Z)으로
       }
     }
 
@@ -1179,13 +1184,11 @@ export function makeRoach(): Roach {
     setDrift(newHeading) {
       driftHeading = newHeading;
     },
-    setBounds(centerZ, radius) {
+    setBounds(halfX, centerZ, halfZ, gapHalfWidth) {
+      boundHalfX = halfX;
       boundCenterZ = centerZ;
-      boundRadius = radius;
-    },
-    setBackLimit(z, halfWidth) {
-      backLimit = z;
-      backLimitGap = halfWidth;
+      boundHalfZ = halfZ;
+      boundGap = gapHalfWidth;
     },
     setHugEdges(on) {
       hugEdges = on;

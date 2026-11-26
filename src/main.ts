@@ -661,10 +661,17 @@ roomFloor.hugEdges = true;
 
 // 돌아다닐 범위. 면마다 모양이 달라서 따로 준다.
 // 복도 바닥은 구멍 안쪽으로 좁게, 방 바닥은 넓게.
+/** 복도 폭의 절반. 벽에 몸이 반쯤 박혀 보이지 않게 조금 안쪽으로 둔다. */
+const CORRIDOR_HALF_X = PORTAL_WIDTH / 2 - 0.05;
+corridorFloor.boundHalfX = CORRIDOR_HALF_X;
 corridorFloor.boundCenterZ = -0.12;
-corridorFloor.boundRadius = 0.2;
-roomFloor.boundCenterZ = 0.5;
-roomFloor.boundRadius = 0.75; // 책상 밑변까지 닿아야 타고 올라갈 수 있다
+corridorFloor.boundHalfZ = 0.2;
+// 책상 발자국 전체를 품어야 네 변 어디로든 타고 올라갈 수 있다.
+// 원일 때는 반지름 0.75로도 가까운 변 하나에만 닿았다 — 축에서 벗어나면
+// 금세 짧아지기 때문이다. 사각형은 네 구석까지 그대로 닿는다.
+roomFloor.boundHalfX = 0.9;
+roomFloor.boundCenterZ = 0.6;
+roomFloor.boundHalfZ = 0.9;
 
 // ── 기다렸다 나오기 ──
 //
@@ -691,22 +698,21 @@ const EMERGE_VIEW_ANGLE = 0.7; // 약 40°
 
 let hasEmerged = false;
 
-/** 대기 구역 안의 아무 자리에 놓는다. 원 안에 고르게 퍼지도록 반지름에 √를 쓴다. */
+/** 대기 구역 안의 아무 자리에 놓는다. 구역이 사각형이라 그대로 사각형에 뿌린다. */
 function scatterInLurk(roach: Roach): void {
-  const angle = Math.random() * Math.PI * 2;
-  const radius = Math.sqrt(Math.random()) * LURK_RADIUS * 0.8;
   roach.placeOn(
     corridorFloor.node,
-    Math.cos(angle) * radius,
-    LURK_CENTER_Z + Math.sin(angle) * radius,
+    (Math.random() * 2 - 1) * CORRIDOR_HALF_X * 0.8,
+    LURK_CENTER_Z + (Math.random() * 2 - 1) * LURK_RADIUS * 0.8,
     Math.random() * Math.PI * 2,
   );
 }
 
 function beginLurking(): void {
   hasEmerged = false;
+  corridorFloor.boundHalfX = CORRIDOR_HALF_X;
   corridorFloor.boundCenterZ = LURK_CENTER_Z;
-  corridorFloor.boundRadius = LURK_RADIUS;
+  corridorFloor.boundHalfZ = LURK_RADIUS;
   corridorFloor.drift = null; // 목적 없이 서성인다
 }
 
@@ -731,20 +737,28 @@ function forwardExitOf(surface: WalkSurface): number | null {
   return null;
 }
 
+/** [임시] 프로브에서 면을 이름으로 보려고 둔 표. 합치기 전에 지운다. */
+const SURFACE_NAMES = new Map<WalkSurface, string>();
+
 /** 지금 올라서 있는 면의 설정을 바퀴에게 적용한다. */
 function applySurface(unit: RoachUnit): void {
   unit.roach.setExitZ(forwardExitOf(unit.surface));
-  unit.roach.setBounds(unit.surface.boundCenterZ, unit.surface.boundRadius);
+  unit.roach.setBounds(
+    unit.surface.boundHalfX,
+    unit.surface.boundCenterZ,
+    unit.surface.boundHalfZ,
+    unit.surface.boundGapHalfWidth,
+  );
   unit.roach.setDrift(unit.surface.drift);
-  unit.roach.setBackLimit(unit.surface.backLimitZ, unit.surface.backHalfWidth);
   unit.roach.setHugEdges(unit.surface.hugEdges);
 }
 
 function beginEmerging(): void {
   if (hasEmerged) return;
   hasEmerged = true;
+  corridorFloor.boundHalfX = CORRIDOR_HALF_X;
   corridorFloor.boundCenterZ = -0.12;
-  corridorFloor.boundRadius = 0.2;
+  corridorFloor.boundHalfZ = 0.2;
   corridorFloor.drift = 0; // 구멍 밖으로
   // 면의 설정을 바꿨으니 지금 그 면에 서 있는 바퀴들에게도 알려 줘야 한다.
   for (const unit of units) {
@@ -776,8 +790,18 @@ const TABLE_SIDE_DIRS = [
 ];
 const tableSides = TABLE_SIDE_DIRS.map(() => makeWalkSurface(scene));
 
+// [임시] 프로브용 이름표. 합치기 전에 지운다.
+SURFACE_NAMES.set(corridorFloor, '복도');
+SURFACE_NAMES.set(wallFace, '벽면');
+SURFACE_NAMES.set(roomFloor, '방바닥');
+SURFACE_NAMES.set(tableTop, '상판');
+tableSides.forEach((side, i) => SURFACE_NAMES.set(side, `책상옆${i}`));
+
 tableTop.hugEdges = true; // 상판은 머무는 곳이다
-tableTop.boundRadius = Math.max(TABLE_HALF_X, TABLE_HALF_Z);
+// 상판은 원이 아니라 발자국 그대로다. 원으로 두면 네 구석에 못 가고,
+// 짧은 쪽 두 변은 원 안쪽 깊숙이 들어가 변이 없는 것처럼 된다.
+tableTop.boundHalfX = TABLE_HALF_X;
+tableTop.boundHalfZ = TABLE_HALF_Z;
 
 /** 방 바닥에서 각 옆면으로 올라가는 모서리. 자리는 layOutTable에서 채운다. */
 const floorToSide = tableSides.map((side, i) => {
@@ -795,8 +819,9 @@ const floorToSide = tableSides.map((side, i) => {
     { nx: 0, nz: -1, at: 0, halfWidth: halfAlong },
   );
 
+  side.boundHalfX = halfAlong;
   side.boundCenterZ = TABLE_HEIGHT / 2;
-  side.boundRadius = TABLE_HEIGHT / 2 + halfAlong;
+  side.boundHalfZ = TABLE_HEIGHT / 2;
 
   // 옆면 ↔ 방 바닥: 옆면의 아래 끝. 바닥 쪽 자리는 책상을 놓을 때 정해진다.
   // 바닥에서 올라갈 때는 띠로 잡는다 — 반평면으로 두면 책상 건너편에 있는
@@ -815,6 +840,8 @@ const floorToSide = tableSides.map((side, i) => {
 });
 
 const tablePoint = new THREE.Vector3();
+/** layOutTable이 들어올 때 베껴 두는 책상 중심. 아래 주석 참고. */
+const tableCenter = new THREE.Vector3();
 const tableDir = new THREE.Vector3();
 const tableQuat = new THREE.Quaternion();
 /** 바닥 자세용으로 따로 둔다. 하나를 돌려 쓰면 반복문 두 번째부터 책상 자세가
@@ -827,7 +854,16 @@ const floorQuat = new THREE.Quaternion();
  * @param facing 상판의 로컬 +Z가 향할 방향(월드, 수평)
  */
 function layOutTable(center: THREE.Vector3, facing: THREE.Vector3): void {
-  tableTop.node.position.copy(center);
+  // center는 호출하는 쪽의 스크래치 벡터일 수 있다 — 실제로 그랬다. 부르는
+  // 쪽이 tablePoint를 그대로 넘겼고, 아래 루프가 그 tablePoint를 고치는 순간
+  // center까지 함께 망가졌다. 그래서 첫 옆면만 제자리에 섰고 나머지 셋은
+  // y = 0, 즉 방 바닥에 깔렸다. 바닥에서 올라간 바퀴는 옆면의 '윗변'에
+  // 도착했는데 그 윗변이 바닥 높이라, 거기서 상판으로 넘어가면 책상에서
+  // 3m 떨어진 허공으로 튀었다.
+  //
+  // 들어올 때 한 번 베끼고, 이후로는 사본만 읽는다.
+  tableCenter.copy(center);
+  tableTop.node.position.copy(tableCenter);
   orientSurface(tableTop.node, WORLD_UP, facing);
   tableTop.node.updateMatrixWorld();
   tableTop.node.getWorldQuaternion(tableQuat);
@@ -840,7 +876,7 @@ function layOutTable(center: THREE.Vector3, facing: THREE.Vector3): void {
 
     // 바깥을 향하는 방향(월드)과 그 변의 중점(월드).
     tableDir.set(dir.nx, 0, dir.nz).applyQuaternion(tableQuat).normalize();
-    tablePoint.copy(center).addScaledVector(tableDir, halfOut);
+    tablePoint.copy(tableCenter).addScaledVector(tableDir, halfOut);
 
     // 옆면: 등이 바깥을 보고, 로컬 +Z가 아래로 간다. 원점은 윗변 중점.
     side.node.position.copy(tablePoint);
@@ -897,11 +933,13 @@ function layOutSurfaces(): void {
   const dropHeight = sill.y;
   wallToFloor.at = dropHeight;
   wallToFloor.halfWidth = dropHeight > 0.05 ? Infinity : 0;
+  // 벽면은 포털보다 양옆으로 조금 더 넓다. 바퀴가 구멍 옆 벽으로도 번진다.
+  wallFace.boundHalfX = PORTAL_WIDTH / 2 + 0.2;
   wallFace.boundCenterZ = dropHeight / 2;
-  wallFace.boundRadius = dropHeight / 2 + 0.12;
-  // 아래턱 위는 벽이 아니라 구멍이다. 구멍 폭 밖에서 넘어가면 허공을 걷게 되니
-  // 선으로 막고, 폭 안쪽은 열어 둔다 — 거기로는 복도로 되돌아 들어간다.
-  wallFace.backLimitZ = 0;
+  wallFace.boundHalfZ = dropHeight / 2;
+  // 사각형의 -Z 변이 곧 아래턱 선이다. 그 위는 벽이 아니라 구멍이라, 구멍 폭
+  // 안쪽만 열어 둔다 — 거기로는 복도로 되돌아 들어가고, 그 밖은 막힌 벽이다.
+  wallFace.boundGapHalfWidth = PORTAL_WIDTH / 2;
 
   for (const surface of [corridorFloor, wallFace, roomFloor]) {
     surface.node.updateMatrixWorld();
@@ -972,9 +1010,13 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
   // 복도 깊은 곳에 흩어 둔다. 줄 세워 놓으면 한눈에 '배치했구나' 싶어진다.
   scatterInLurk(roach);
   roach.setExitZ(forwardExitOf(corridorFloor));
-  roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
+  roach.setBounds(
+    corridorFloor.boundHalfX,
+    corridorFloor.boundCenterZ,
+    corridorFloor.boundHalfZ,
+    corridorFloor.boundGapHalfWidth,
+  );
   roach.setDrift(corridorFloor.drift);
-  roach.setBackLimit(corridorFloor.backLimitZ, corridorFloor.backHalfWidth);
   roach.setHugEdges(corridorFloor.hugEdges);
 
   // 바퀴를 두 벌로 나눈다. roach.root는 '바깥 복사본'이 되고, 같은 자세를
@@ -1195,17 +1237,11 @@ renderer.setAnimationLoop((time, frame) => {
     // 모서리를 넘었으면 다음 면으로 옮긴다.
     const next = transferIfCrossed(unit.roach, unit.surface);
     if (next !== unit.surface) {
-      const name =
-        next === wallFace
-          ? '벽면'
-          : next === roomFloor
-            ? '방 바닥'
-            : next === tableTop
-              ? '책상 위'
-              : next === corridorFloor
-                ? '복도 바닥'
-                : `책상 옆면 ${tableSides.indexOf(next)}`;
-      log(`${units.indexOf(unit)}번 → ${name}`);
+      // [임시] 어디서 어디로 넘어갔는지. 합치기 전에 지운다.
+      log(
+        `${units.indexOf(unit)}번 ${SURFACE_NAMES.get(unit.surface)}` +
+          ` → ${SURFACE_NAMES.get(next)}`,
+      );
       unit.surface = next;
     }
   }
@@ -1252,6 +1288,26 @@ renderer.setAnimationLoop((time, frame) => {
         ` · 묶음 ${roachBatch.poolCount()}`,
     );
   }
+});
+
+// [임시] 미리보기에서 바퀴가 범위 안에 있는지 콘솔로 확인하려고 둔 창구.
+// 합치기 전에 지운다.
+Object.assign(window, {
+  // [임시] 책상 네 옆면의 원점 높이. 전부 책상 높이여야 한다.
+  sides: () =>
+    tableSides.map((side) => +side.node.getWorldPosition(new THREE.Vector3()).y.toFixed(3)),
+  probe: () =>
+    units.map((unit) => {
+      const p = unit.roach.root.position;
+      const s = unit.surface;
+      return {
+        면: SURFACE_NAMES.get(s) ?? '?',
+        x: +p.x.toFixed(3),
+        z: +p.z.toFixed(3),
+        여유X: +(s.boundHalfX - Math.abs(p.x)).toFixed(3),
+        여유Z: +(s.boundHalfZ - Math.abs(p.z - s.boundCenterZ)).toFixed(3),
+      };
+    }),
 });
 
 // ---------------------------------------------------------------------------

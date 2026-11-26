@@ -64,13 +64,24 @@ export interface WalkSurface {
   hugEdges: boolean;
   /** 이 면 위에서 가고 싶어 하는 방향(heading). null이면 목적 없이 방황. */
   drift: number | null;
-  /** 돌아다닐 범위. 면의 로컬 XZ에서 (0, boundCenterZ)를 중심으로 한 원. */
+  /**
+   * 돌아다닐 범위. 면의 로컬 XZ에서 축에 정렬된 사각형이다.
+   *
+   * 원이었다. 포털이 만든 면들은 좁고 길어서 원으로도 그럭저럭 맞았지만,
+   * 방에서 감지된 벽은 3m × 2.4m다. 거기에 내접원을 두면 네 구석에 영영
+   * 못 간다 — 즉 다른 평면과 만나는 모서리에도 못 닿는다. 사각형이어야
+   * 면 전체를 쓰고, 그래야 모서리로 넘어갈 수 있다.
+   */
+  boundHalfX: number;
   boundCenterZ: number;
-  boundRadius: number;
-  /** 이 z보다 뒤로는 면이 없다. null이면 원만으로 충분하다. */
-  backLimitZ: number | null;
-  /** 그 선에 뚫려 있는 문의 반폭. */
-  backHalfWidth: number;
+  boundHalfZ: number;
+  /**
+   * 사각형의 -Z 변에 뚫려 있는 구멍의 반폭(x = 0 중심).
+   *
+   * 벽면의 위쪽이 그렇다 — 포털 구멍 안쪽은 복도로 이어지고, 그 밖은 막힌
+   * 벽이다. 0이면 변 전체가 막혀 있고, Infinity면 전체가 열려 있다.
+   */
+  boundGapHalfWidth: number;
 }
 
 const normalAxis = new THREE.Vector3();
@@ -110,10 +121,10 @@ export function makeWalkSurface(parent: THREE.Object3D): WalkSurface {
     edges: [],
     hugEdges: false,
     drift: null,
+    boundHalfX: 0.12,
     boundCenterZ: 0,
-    boundRadius: 0.12,
-    backLimitZ: null,
-    backHalfWidth: 0,
+    boundHalfZ: 0.12,
+    boundGapHalfWidth: 0,
   };
 }
 
@@ -154,8 +165,7 @@ export interface Walker {
   ): void;
   getHeading(): number;
   setDrift(newHeading: number | null): void;
-  setBounds(centerZ: number, radius: number): void;
-  setBackLimit(z: number | null, halfWidth: number): void;
+  setBounds(halfX: number, centerZ: number, halfZ: number, gapHalfWidth: number): void;
   setHugEdges(on: boolean): void;
 }
 
@@ -174,8 +184,12 @@ const localForward = new THREE.Vector3();
 
 function applySurface(walker: Walker, surface: WalkSurface, drift: number | null): void {
   walker.setDrift(drift);
-  walker.setBounds(surface.boundCenterZ, surface.boundRadius);
-  walker.setBackLimit(surface.backLimitZ, surface.backHalfWidth);
+  walker.setBounds(
+    surface.boundHalfX,
+    surface.boundCenterZ,
+    surface.boundHalfZ,
+    surface.boundGapHalfWidth,
+  );
   walker.setHugEdges(surface.hugEdges);
 }
 

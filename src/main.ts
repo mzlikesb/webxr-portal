@@ -1024,7 +1024,6 @@ const palmLocal = new THREE.Vector3();
 const palmVelocityLocal = new THREE.Vector3();
 const surfaceQuat = new THREE.Quaternion();
 let handsSeen = false;
-let smashProbe = 0; // 임시: 계측 로그 간격
 
 /** 손가락 끝에 닿은 바퀴를 놀래킨다. */
 function applyTouches(): void {
@@ -1062,16 +1061,9 @@ function applyTouches(): void {
  * 걸리고, 거리만 보면 천천히 손을 짚어도 죽는다. 면의 법선 방향 속도를 보므로
  * 벽이든 바닥이든 책상이든 같은 코드로 판정된다.
  */
-function applySmashes(dt: number): void {
-  // 가장 가까웠던 조합. 아무것도 안 맞아도 숫자가 나와야 문턱을 맞출 수 있다.
-  let bestDistance = Infinity;
-  let bestHeight = 0;
-  let bestPeak = 0;
-  let anyHand = false;
-
+function applySmashes(): void {
   for (const hand of handTracker.hands) {
     if (!hand.tracked) continue;
-    anyHand = true;
 
     // 손바닥 하나가 아니라 손 전체로 친다.
     //
@@ -1089,12 +1081,6 @@ function applySmashes(dt: number): void {
         const dz = palmLocal.z - unit.roach.root.position.z;
         const distance = Math.hypot(dx, dz);
 
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          bestHeight = palmLocal.y;
-          bestPeak = hand.peakSpeed;
-        }
-
         if (Math.abs(palmLocal.y) > SMASH_HEIGHT) continue;
         if (distance > SMASH_RADIUS) continue;
 
@@ -1111,17 +1097,6 @@ function applySmashes(dt: number): void {
       }
     }
   }
-
-  // 손이 보이는 동안은 계속 찍는다. 빗나가도 얼마나 빗나갔는지가 남아야 한다.
-  // 임시.
-  if (!anyHand) return;
-  smashProbe += dt;
-  if (smashProbe < 0.5) return;
-  smashProbe = 0;
-  log(
-    `손: 가장 가까운 바퀴 ${bestDistance.toFixed(3)}m` +
-      ` · 면에서 ${bestHeight.toFixed(3)}m · 최고속력 ${bestPeak.toFixed(2)}`,
-  );
 }
 
 const viewerPosition = new THREE.Vector3();
@@ -1181,7 +1156,7 @@ renderer.setAnimationLoop((time, frame) => {
     if (handSpace !== null) {
       handTracker.update(frame, handSpace, dt);
       applyTouches();
-      applySmashes(dt);
+      applySmashes();
     }
   }
 

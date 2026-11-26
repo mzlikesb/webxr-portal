@@ -63,6 +63,17 @@ export function setPortalStencilRef(ref: number): void {
   stencilRef = ref;
 }
 
+/** 안쪽 복사본 재질의 원래 투명도. 페이드는 여기에 곱한다. */
+const insideBaseOpacity = new Map<THREE.Material, number>();
+
+/** 포털이 흐려지는 만큼 안쪽 복사본도 같이 흐려진다. */
+export function setInsidePortalOpacity(k: number): void {
+  for (const [material, base] of insideBaseOpacity) {
+    material.opacity = base * k;
+    material.visible = k > 0;
+  }
+}
+
 function variantOf(
   material: THREE.Material,
   cache: Map<THREE.Material, THREE.Material>,
@@ -74,6 +85,7 @@ function variantOf(
   const copy = material.clone();
   configure(copy);
   cache.set(material, copy);
+  if (cache === insideVariants) insideBaseOpacity.set(copy, copy.opacity);
   return copy;
 }
 
@@ -124,11 +136,17 @@ export function makePortalCrossing(outside: THREE.Object3D): PortalCrossing {
   });
 
   // 안쪽: 반대쪽을 남기고, 포털 마스크가 찍어 둔 자리에만 그린다.
+  //
+  // 포털이 근접 페이드로 흐려질 때 같이 흐려져야 해서 transparent로 둔다.
+  // 처음에 안 묶어 뒀더니 복도만 사라지고 그 안의 바퀴는 불투명하게 남아,
+  // 허공에 바퀴만 떠 있는 그림이 됐다. 런타임에 transparent를 켜면 셰이더가
+  // 다시 컴파일되므로 만들 때부터 켜 둔다.
   replaceMaterials(inside, insideVariants, (m) => {
     m.clippingPlanes = [backPlane];
     m.stencilWrite = true;
     m.stencilRef = stencilRef;
     m.stencilFunc = THREE.EqualStencilFunc;
+    m.transparent = true;
   });
 
   // 마스크(renderOrder -1)보다 반드시 나중에 그려야 스텐실이 이미 찍혀 있다.

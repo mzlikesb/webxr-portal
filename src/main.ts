@@ -4,6 +4,7 @@ import type { Roach } from './roach';
 import {
   disablePortalPlane,
   makePortalCrossing,
+  setInsidePortalOpacity,
   setPortalPlane,
   setPortalStencilRef,
 } from './portal-crossing';
@@ -563,15 +564,16 @@ function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
 //
 // 그 구간에 도달하기 전에 포털을 흐려서 없앤다. 통과를 지원하려면 더 큰 작업이
 // 필요한데(⑥에서 다룬 기법들), 이 작품의 범위에서는 이걸로 충분하다.
-const PORTAL_FADE_FULL_AT = 0.3; // 이보다 멀면 완전히 보인다
-const PORTAL_FADE_GONE_AT = 0.08; // 이보다 가까우면 완전히 사라진다
+// 처음엔 0.3 → 0.08이었는데 너무 일렀다. 30cm는 구멍 안을 들여다보려고 몸을
+// 기울이는 거리라, 보려고 다가가면 이미 흐려지기 시작했다.
+// 실제로 깨지는 구간은 눈 간격(6.4cm) 안쪽이다. 거기 닿기 직전에만 걷는다.
+const PORTAL_FADE_FULL_AT = 0.13; // 이보다 멀면 완전히 보인다
+const PORTAL_FADE_GONE_AT = 0.045; // 이보다 가까우면 완전히 사라진다
 
-const headPosition = new THREE.Vector3();
 const portalFacing = new THREE.Vector3();
 const headToPortal = new THREE.Vector3();
 
-function updatePortalFade(): void {
-  renderer.xr.getCamera().getWorldPosition(headPosition);
+function updatePortalFade(headPosition: THREE.Vector3): void {
 
   // 포털 그룹의 로컬 +Z가 법선이다(orientPortal이 그렇게 맞춰 놨다).
   portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
@@ -592,6 +594,10 @@ function updatePortalFade(): void {
   for (const entry of portalFadeMaterials) {
     entry.material.opacity = entry.baseOpacity * visibility;
   }
+
+  // 포털 안에 있는 바퀴도 같이 흐려져야 한다. 안 묶어 두면 복도만 사라지고
+  // 바퀴는 불투명하게 남아, 허공에 벌레만 떠 있는 그림이 된다.
+  setInsidePortalOpacity(visibility);
 }
 
 // ---------------------------------------------------------------------------
@@ -952,13 +958,14 @@ renderer.setAnimationLoop((time, frame) => {
     const referenceSpace = renderer.xr.getReferenceSpace();
     if (referenceSpace !== null) {
       updatePlanes(frame, referenceSpace);
-      if (portalPlaced === false) {
-        updatePortalPreview(frame, referenceSpace);
-      } else {
-        updatePortalFade();
-      }
+      if (portalPlaced === false) updatePortalPreview(frame, referenceSpace);
     }
   }
+
+  // 근접 페이드는 세션 밖에서도 돈다. 전에는 XR 안에서만 돌아서 데스크톱에서는
+  // 한 번도 눈으로 볼 수 없었고, 그래서 잘못된 줄도 몰랐다. 머리 위치만
+  // 있으면 되는 계산이라 미리보기 카메라로도 똑같이 돈다.
+  if (portalPlaced) updatePortalFade(viewerPosition);
 
   renderer.render(scene, camera);
 

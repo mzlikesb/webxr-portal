@@ -28,19 +28,33 @@ import * as THREE from 'three';
 // ---------------------------------------------------------------------------
 
 export interface SurfaceEdge {
-  /** 이 로컬 축이 */
-  axis: 'x' | 'z';
-  /** 이 방향으로 */
-  sign: 1 | -1;
-  /** 이 값을 넘으면 넘어간다. */
-  at: number;
-  to: WalkSurface;
   /**
-   * 모서리가 실제로 뚫려 있는 범위. 모서리 축 좌표의 절댓값이 이 값을 넘으면
-   * 넘어가지 않는다. 벽면 위쪽이 그렇다 — 구멍 폭 안이면 복도로 이어지고
-   * 그 밖은 막힌 벽이다. Infinity면 모서리 전체가 열려 있다.
+   * 면의 로컬 XZ에서 모서리 바깥을 향하는 단위 법선.
+   *
+   * 축과 부호 대신 법선을 쓰는 이유: 책상은 벽과 나란하다는 보장이 없고,
+   * 바닥에서 본 책상 발자국은 네 변짜리 사각형이다. 축에 정렬된 모서리로는
+   * 그런 것을 적을 수 없다. 직선 하나는 법선과 거리로 적으면 방향을 안 탄다.
+   */
+  nx: number;
+  nz: number;
+  /** 그 법선 방향으로 이만큼을 넘으면 모서리를 넘은 것이다. */
+  at: number;
+  /** 모서리를 따라간 좌표의 중심. 모서리가 면의 원점을 지나지 않을 수 있다. */
+  alongCenter: number;
+  /**
+   * 모서리가 실제로 뚫려 있는 반폭. 벽면 위쪽이 그렇다 — 구멍 폭 안이면
+   * 복도로 이어지고 그 밖은 막힌 벽이다. Infinity면 전체가 열려 있다.
    */
   halfWidth: number;
+  /**
+   * 모서리 바로 바깥의 '띠' 두께. 이 띠 안에서만 넘어간다.
+   *
+   * 반평면으로만 판정하면, 책상 건너편 바닥에 있는 바퀴도 '가까운 쪽 옆면을
+   * 넘어섰다'로 잡힌다. 한 프레임에 1cm도 못 가므로 얇은 띠면 실제로 건너는
+   * 순간만 잡힌다. Infinity면 띠 없이 반평면 전체다.
+   */
+  band: number;
+  to: WalkSurface;
 }
 
 export interface WalkSurface {
@@ -103,15 +117,30 @@ export function makeWalkSurface(parent: THREE.Object3D): WalkSurface {
   };
 }
 
+type EdgeSpec = Partial<Omit<SurfaceEdge, 'to'>> & Pick<SurfaceEdge, 'nx' | 'nz' | 'at'>;
+
+function fillEdge(spec: EdgeSpec, to: WalkSurface): SurfaceEdge {
+  return {
+    alongCenter: 0,
+    halfWidth: Infinity,
+    band: Infinity,
+    ...spec,
+    to,
+  };
+}
+
 /** 두 면을 한 모서리로 잇는다. 양쪽에 서로를 가리키는 모서리가 하나씩 생긴다. */
 export function linkSurfaces(
   a: WalkSurface,
-  aEdge: Omit<SurfaceEdge, 'to'>,
+  aEdge: EdgeSpec,
   b: WalkSurface,
-  bEdge: Omit<SurfaceEdge, 'to'>,
-): void {
-  a.edges.push({ ...aEdge, to: b });
-  b.edges.push({ ...bEdge, to: a });
+  bEdge: EdgeSpec,
+): [SurfaceEdge, SurfaceEdge] {
+  const forward = fillEdge(aEdge, b);
+  const backward = fillEdge(bEdge, a);
+  a.edges.push(forward);
+  b.edges.push(backward);
+  return [forward, backward];
 }
 
 export interface Walker {
@@ -161,12 +190,22 @@ export function transferIfCrossed(walker: Walker, current: WalkSurface): WalkSur
   const position = walker.root.position;
 
   for (const edge of current.edges) {
-    const value = edge.axis === 'x' ? position.x : position.z;
-    if (edge.sign * value <= edge.sign * edge.at) continue;
+    // 법선 방향으로 얼마나 넘어갔는지.
+    const past = position.x * edge.nx + position.z * edge.nz - edge.at;
+    if (past <= 0 || past > edge.band) continue;
+
+    // 그 방향으로 가고 있을 때만 넘는다.
+    //
+    // 띠만으로 막으려 했더니, 프레임이 느릴 때 한 번에 띠를 통째로 건너뛰어
+    // 모서리를 못 잡았다. 띠를 넓히면 이번엔 책상 건너편에 있는 바퀴까지
+    // 걸린다. 진행 방향을 보면 둘 다 풀린다 — 넘어가는 건 그쪽으로 가고
+    // 있을 때뿐이고, 멀리서 가만히 있거나 멀어지는 중이면 아니다.
+    const h = walker.getHeading();
+    if (Math.sin(h) * edge.nx + Math.cos(h) * edge.nz <= 0) continue;
 
     // 모서리를 따라간 좌표. 이 범위 밖이면 그 자리에 모서리가 없다.
-    const along = edge.axis === 'x' ? position.z : position.x;
-    if (Math.abs(along) > edge.halfWidth) continue;
+    const along = -position.x * edge.nz + position.z * edge.nx;
+    if (Math.abs(along - edge.alongCenter) > edge.halfWidth) continue;
 
     const next = edge.to;
 
@@ -174,9 +213,9 @@ export function transferIfCrossed(walker: Walker, current: WalkSurface): WalkSur
     current.node.updateMatrixWorld();
     next.node.updateMatrixWorld();
 
-    // 모서리 선의 방향 = 넘는 축이 아닌 쪽 축.
+    // 모서리 선의 방향 = 법선을 90° 돌린 것.
     edgeDir
-      .set(edge.axis === 'x' ? 0 : 1, 0, edge.axis === 'x' ? 1 : 0)
+      .set(-edge.nz, 0, edge.nx)
       .applyQuaternion(current.node.getWorldQuaternion(fromWorld))
       .normalize();
 

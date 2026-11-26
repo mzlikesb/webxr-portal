@@ -634,22 +634,20 @@ const roomFloor = makeWalkSurface(scene);
 // 벽면에서 위로 올라가는 건 구멍 폭 안에서만 된다 — 그 밖은 막힌 벽이다.
 linkSurfaces(
   corridorFloor,
-  { axis: 'z', sign: 1, at: 0, halfWidth: Infinity },
+  { nx: 0, nz: 1, at: 0 },
   wallFace,
-  { axis: 'z', sign: -1, at: 0, halfWidth: PORTAL_WIDTH / 2 },
+  { nx: 0, nz: -1, at: 0, halfWidth: PORTAL_WIDTH / 2 },
 );
 
 // 걸레받이: 벽면의 +Z 끝(= 바닥까지의 낙차)과 방 바닥의 -Z 끝이 만난다.
 // 낙차는 포털을 놓은 높이에 따라 달라지므로 layOutSurfaces에서 채운다.
-const skirtingEdge = { axis: 'z' as const, sign: 1 as const, at: 1, halfWidth: Infinity };
-linkSurfaces(wallFace, skirtingEdge, roomFloor, {
-  axis: 'z',
-  sign: -1,
-  at: 0,
-  halfWidth: Infinity,
-});
-/** 위에서 만든 '벽면 → 방 바닥' 모서리. 낙차가 정해지면 at을 고친다. */
-const wallToFloor = wallFace.edges[wallFace.edges.length - 1];
+/** '벽면 → 방 바닥' 모서리. 낙차가 정해지면 at을 고친다. */
+const [wallToFloor] = linkSurfaces(
+  wallFace,
+  { nx: 0, nz: 1, at: 1 },
+  roomFloor,
+  { nx: 0, nz: -1, at: 0 },
+);
 
 // 세 면 모두 +Z가 '계속 가는 쪽'이다.
 // 복도에서는 구멍 밖, 벽에서는 아래로, 바닥에서는 벽에서 멀어지는 쪽.
@@ -664,8 +662,8 @@ roomFloor.hugEdges = true;
 // 복도 바닥은 구멍 안쪽으로 좁게, 방 바닥은 넓게.
 corridorFloor.boundCenterZ = -0.12;
 corridorFloor.boundRadius = 0.2;
-roomFloor.boundCenterZ = 0.25;
-roomFloor.boundRadius = 0.4;
+roomFloor.boundCenterZ = 0.5;
+roomFloor.boundRadius = 0.75; // 책상 밑변까지 닿아야 타고 올라갈 수 있다
 
 // ── 기다렸다 나오기 ──
 //
@@ -727,7 +725,7 @@ function resetRoaches(): void {
  */
 function forwardExitOf(surface: WalkSurface): number | null {
   for (const edge of surface.edges) {
-    if (edge.axis === 'z' && edge.sign === 1 && edge.halfWidth > 0) return edge.at;
+    if (edge.nz > 0.9 && edge.halfWidth > 0) return edge.at;
   }
   return null;
 }
@@ -755,6 +753,115 @@ function beginEmerging(): void {
 }
 
 beginLurking();
+
+// ---------------------------------------------------------------------------
+// 책상
+//
+// 상판 하나와 옆면 넷. 상판은 네 변 어디로든 넘어갈 수 있고, 옆면은 각각
+// 상판과 방 바닥을 잇는다. 한쪽으로 올라가 반대쪽으로 내려오면 바닥으로
+// 되돌아오는 고리가 되는데, 모서리를 목록으로 바꾼 게 이걸 위해서다.
+// ---------------------------------------------------------------------------
+const TABLE_HALF_X = 0.62; // 감지된 책상이 1.25 x 0.73이었다
+const TABLE_HALF_Z = 0.36;
+const TABLE_HEIGHT = 0.72;
+
+const tableTop = makeWalkSurface(scene);
+/** +X, -X, +Z, -Z 순서. 상판의 로컬 축 기준이다. */
+const TABLE_SIDE_DIRS = [
+  { nx: 1, nz: 0 },
+  { nx: -1, nz: 0 },
+  { nx: 0, nz: 1 },
+  { nx: 0, nz: -1 },
+];
+const tableSides = TABLE_SIDE_DIRS.map(() => makeWalkSurface(scene));
+
+tableTop.hugEdges = true; // 상판은 머무는 곳이다
+tableTop.boundRadius = Math.max(TABLE_HALF_X, TABLE_HALF_Z);
+
+/** 방 바닥에서 각 옆면으로 올라가는 모서리. 자리는 layOutTable에서 채운다. */
+const floorToSide = tableSides.map((side, i) => {
+  const halfAlong = TABLE_SIDE_DIRS[i].nx !== 0 ? TABLE_HALF_Z : TABLE_HALF_X;
+
+  // 상판 ↔ 옆면: 상판의 그 변에서 만난다. 옆면 쪽은 로컬 -Z(위)가 상판이다.
+  linkSurfaces(
+    tableTop,
+    {
+      ...TABLE_SIDE_DIRS[i],
+      at: TABLE_SIDE_DIRS[i].nx !== 0 ? TABLE_HALF_X : TABLE_HALF_Z,
+      halfWidth: halfAlong,
+    },
+    side,
+    { nx: 0, nz: -1, at: 0, halfWidth: halfAlong },
+  );
+
+  side.boundCenterZ = TABLE_HEIGHT / 2;
+  side.boundRadius = TABLE_HEIGHT / 2 + halfAlong;
+
+  // 옆면 ↔ 방 바닥: 옆면의 아래 끝. 바닥 쪽 자리는 책상을 놓을 때 정해진다.
+  // 바닥에서 올라갈 때는 띠로 잡는다 — 반평면으로 두면 책상 건너편에 있는
+  // 바퀴까지 '넘어섰다'로 잡힌다.
+  const [, floorEdge] = linkSurfaces(
+    side,
+    { nx: 0, nz: 1, at: TABLE_HEIGHT, halfWidth: halfAlong },
+    roomFloor,
+    // 띠는 두지 않는다. 방 바닥에는 책상 발자국만큼의 구멍이 없어서 바퀴가
+    // 그 위를 자유롭게 지나다니고, 주촉성 때문에 선에서 한참 떨어진 자리에
+    // 머문다. 띠로 잡으려면 늘 '너무 많이 지나간' 상태다.
+    // 대신 진행 방향으로 거른다 — 그쪽으로 가고 있을 때만 타고 오른다.
+    { nx: 0, nz: 1, at: 0, halfWidth: halfAlong },
+  );
+  return floorEdge;
+});
+
+const tablePoint = new THREE.Vector3();
+const tableDir = new THREE.Vector3();
+const tableQuat = new THREE.Quaternion();
+/** 바닥 자세용으로 따로 둔다. 하나를 돌려 쓰면 반복문 두 번째부터 책상 자세가
+ *  바닥 자세로 덮여서, 옆면들이 엉뚱한 방향을 가리킨다. */
+const floorQuat = new THREE.Quaternion();
+
+/**
+ * 책상을 놓는다.
+ * @param center 상판 중심(월드)
+ * @param facing 상판의 로컬 +Z가 향할 방향(월드, 수평)
+ */
+function layOutTable(center: THREE.Vector3, facing: THREE.Vector3): void {
+  tableTop.node.position.copy(center);
+  orientSurface(tableTop.node, WORLD_UP, facing);
+  tableTop.node.updateMatrixWorld();
+  tableTop.node.getWorldQuaternion(tableQuat);
+
+  roomFloor.node.updateMatrixWorld();
+
+  tableSides.forEach((side, i) => {
+    const dir = TABLE_SIDE_DIRS[i];
+    const halfOut = dir.nx !== 0 ? TABLE_HALF_X : TABLE_HALF_Z;
+
+    // 바깥을 향하는 방향(월드)과 그 변의 중점(월드).
+    tableDir.set(dir.nx, 0, dir.nz).applyQuaternion(tableQuat).normalize();
+    tablePoint.copy(center).addScaledVector(tableDir, halfOut);
+
+    // 옆면: 등이 바깥을 보고, 로컬 +Z가 아래로 간다. 원점은 윗변 중점.
+    side.node.position.copy(tablePoint);
+    orientSurface(side.node, tableDir, WORLD_UP.clone().negate());
+    side.node.updateMatrixWorld();
+
+    // 바닥 쪽 모서리: 이 옆면의 밑변이 방 바닥 로컬에서 어떤 직선인지 적는다.
+    // 법선은 '책상 쪽으로' 향해야 한다 — 그쪽으로 걸어가다 올라타는 것이다.
+    tablePoint.y = 0;
+    roomFloor.node.worldToLocal(tablePoint);
+    tableDir.applyQuaternion(roomFloor.node.getWorldQuaternion(floorQuat).invert());
+
+    const nx = -tableDir.x;
+    const nz = -tableDir.z;
+    const length = Math.hypot(nx, nz) || 1;
+    floorToSide[i].nx = nx / length;
+    floorToSide[i].nz = nz / length;
+    floorToSide[i].at = tablePoint.x * floorToSide[i].nx + tablePoint.z * floorToSide[i].nz;
+    floorToSide[i].alongCenter =
+      -tablePoint.x * floorToSide[i].nz + tablePoint.z * floorToSide[i].nx;
+  });
+}
 
 /** 두 면을 포털 자리에 맞춰 세운다. 포털을 옮기면 다시 부른다. */
 function layOutSurfaces(): void {
@@ -798,20 +905,36 @@ function layOutSurfaces(): void {
   for (const surface of [corridorFloor, wallFace, roomFloor]) {
     surface.node.updateMatrixWorld();
   }
+
+  // 책상은 벽에서 조금 떨어진 자리에 놓는다. 방에서 감지된 'table' 평면에
+  // 맞추는 건 다음 단계다 — 지금은 포털 기준으로 둔다.
+  tablePoint
+    .set(sill.x, TABLE_HEIGHT, sill.z)
+    .addScaledVector(portalNormal, TABLE_HALF_Z + 0.45);
+  layOutTable(tablePoint, portalNormal);
 }
 
 
 // 걸음이 미끄러지는지, 모서리를 어떻게 넘는지 보려면 면에 무늬가 있어야
 // 한다. 면마다 하나씩. 임시.
 const surfaceGrids = [
-  { surface: corridorFloor, side: -1 }, // 복도 바닥은 아래턱 안쪽(-Z)만 유효
-  { surface: wallFace, side: 1 }, // 벽면은 아래턱 아래쪽(+Z)만 유효
-  { surface: roomFloor, side: 1 }, // 방 바닥은 벽 바깥쪽(+Z)만 유효
-].map(({ surface, side }) => {
-  const grid = new THREE.GridHelper(0.4, 40, 0x335544, 0x223333);
-  // GridHelper는 원점 중심이다. 면의 원점은 모서리 위에 있으므로 그대로 두면
+  { surface: corridorFloor, size: 0.4, offsetZ: -0.2, stretchX: 1 }, // 아래턱 안쪽
+  { surface: wallFace, size: 0.4, offsetZ: 0.2, stretchX: 1 }, // 아래턱 아래쪽
+  { surface: roomFloor, size: 1.6, offsetZ: 0.5, stretchX: 1 }, // 벽 바깥쪽
+  // 상판은 원점이 가운데. 격자는 정사각형이라 X로 늘려 직사각형을 만든다.
+  { surface: tableTop, size: 2 * TABLE_HALF_Z, offsetZ: 0, stretchX: TABLE_HALF_X / TABLE_HALF_Z },
+  ...tableSides.map((surface, i) => ({
+    surface,
+    size: TABLE_HEIGHT,
+    offsetZ: TABLE_HEIGHT / 2,
+    stretchX: (2 * (TABLE_SIDE_DIRS[i].nx !== 0 ? TABLE_HALF_Z : TABLE_HALF_X)) / TABLE_HEIGHT,
+  })),
+].map(({ surface, size, offsetZ, stretchX }) => {
+  const grid = new THREE.GridHelper(size, Math.round(size * 100), 0x335544, 0x223333);
+  // GridHelper는 원점 중심이다. 면의 원점이 모서리 위에 있으면 그대로 두면
   // 격자가 모서리 반대편까지 뻗어 두 면이 겹쳐 보인다. 유효한 쪽으로 민다.
-  grid.position.z = side * 0.2;
+  grid.position.z = offsetZ;
+  if (stretchX !== undefined) grid.scale.x = stretchX;
   surface.node.add(grid);
   return grid;
 });
@@ -874,8 +997,8 @@ layOutSurfaces();
 
 // 미리보기 카메라를 포털 아래턱 가까이 가져간다. 바퀴가 4cm라 멀리서는 점이고,
 // 모서리를 넘는 순간을 봐야 한다. 세션에서는 이 값이 헤드셋 포즈에 덮인다. 임시.
-camera.position.set(0, 1.15, -0.35);
-camera.lookAt(0, 0.95, -1.3); // 포털을 정면으로 — 시선 조건도 같이 보려고
+camera.position.set(1.7, 1.9, 0.7); // 임시: 벽·바닥·책상이 한 화면에 들어오게
+camera.lookAt(0, 0.4, -0.85);
 
 const viewerPosition = new THREE.Vector3();
 /** 위 값을 면 로컬로 옮긴 것. 마리마다 면이 달라 매번 다시 만든다. */
@@ -960,7 +1083,16 @@ renderer.setAnimationLoop((time, frame) => {
     // 모서리를 넘었으면 다음 면으로 옮긴다.
     const next = transferIfCrossed(unit.roach, unit.surface);
     if (next !== unit.surface) {
-      const name = next === wallFace ? '벽면' : next === roomFloor ? '방 바닥' : '복도 바닥';
+      const name =
+        next === wallFace
+          ? '벽면'
+          : next === roomFloor
+            ? '방 바닥'
+            : next === tableTop
+              ? '책상 위'
+              : next === corridorFloor
+                ? '복도 바닥'
+                : `책상 옆면 ${tableSides.indexOf(next)}`;
       log(`${units.indexOf(unit)}번 → ${name}`);
       unit.surface = next;
     }

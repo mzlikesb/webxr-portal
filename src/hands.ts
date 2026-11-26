@@ -32,6 +32,14 @@ export interface TrackedHand {
   palm: THREE.Vector3;
   /** 손바닥 속도(월드, m/s). 프레임 차이로 구한 뒤 약간 다듬었다. */
   palmVelocity: THREE.Vector3;
+  /**
+   * 최근 0.2초쯤의 최고 속력(m/s).
+   *
+   * 때리는 동작은 '빠르다'와 '닿았다'가 같은 순간이 아니다. 손바닥은 닿기
+   * 직전에 이미 느려지므로, 접촉 프레임의 속도만 보면 세게 쳐도 느린 값이
+   * 나온다. 조금 전까지 얼마나 빨랐는지를 따로 기억한다.
+   */
+  peakSpeed: number;
 }
 
 export interface HandTracker {
@@ -48,6 +56,7 @@ function makeHand(handedness: 'left' | 'right'): TrackedHand {
     tips: FINGER_TIPS.map(() => new THREE.Vector3()),
     palm: new THREE.Vector3(),
     palmVelocity: new THREE.Vector3(),
+    peakSpeed: 0,
   };
 }
 
@@ -127,11 +136,15 @@ export function makeHandTracker(): HandTracker {
         if (hand.tracked === false && dt > 0) {
           // 막 잡히기 시작했다. 직전 위치가 없으므로 속도는 0에서 시작한다.
           hand.palmVelocity.set(0, 0, 0);
+          hand.peakSpeed = 0;
         } else if (dt > 0) {
           rawVelocity.subVectors(newPalm, hand.palm).divideScalar(dt);
           // 관절 포즈는 프레임마다 조금씩 떨린다. 그대로 미분하면 가만히 있어도
           // 속도가 튀어서 '내려쳤다'로 잡힌다. 약간 다듬는다.
           hand.palmVelocity.lerp(rawVelocity, 0.5);
+          // 최고 속력은 다듬지 않은 값에서 잡고 천천히 식힌다. 다듬은 값에서
+          // 잡으면 정점이 깎여서, 세게 친 것도 약하게 기록된다.
+          hand.peakSpeed = Math.max(rawVelocity.length(), hand.peakSpeed - dt * 6);
         }
 
         hand.palm.copy(newPalm);

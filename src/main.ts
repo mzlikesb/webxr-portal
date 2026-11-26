@@ -1012,18 +1012,19 @@ const TOUCH_RADIUS = 0.05;
 /** 면에서 이만큼 떨어진 손가락은 아직 닿지 않은 것이다(m). */
 const TOUCH_HEIGHT = 0.07;
 
-/** 손바닥이 이 속도보다 빠르게 면으로 내리꽂히면 내려친 것이다(m/s). */
-const SMASH_SPEED = 1.2;
+/** 최근 최고 속력이 이보다 빨랐어야 내려친 것으로 친다(m/s). */
+const SMASH_SPEED = 0.9;
 /** 내려칠 때 손바닥이 면에서 이 거리 안이어야 한다(m). */
-const SMASH_HEIGHT = 0.09;
+const SMASH_HEIGHT = 0.13;
 /** 손바닥에 깔리는 범위(m). */
-const SMASH_RADIUS = 0.07;
+const SMASH_RADIUS = 0.09;
 
 const tipLocal = new THREE.Vector3();
 const palmLocal = new THREE.Vector3();
 const palmVelocityLocal = new THREE.Vector3();
 const surfaceQuat = new THREE.Quaternion();
 let handsSeen = false;
+let smashProbe = 0; // 임시: 계측 로그 간격
 
 /** 손가락 끝에 닿은 바퀴를 놀래킨다. */
 function applyTouches(): void {
@@ -1061,7 +1062,7 @@ function applyTouches(): void {
  * 걸리고, 거리만 보면 천천히 손을 짚어도 죽는다. 면의 법선 방향 속도를 보므로
  * 벽이든 바닥이든 책상이든 같은 코드로 판정된다.
  */
-function applySmashes(): void {
+function applySmashes(dt: number): void {
   for (const hand of handTracker.hands) {
     if (!hand.tracked) continue;
 
@@ -1077,11 +1078,28 @@ function applySmashes(): void {
       palmVelocityLocal
         .copy(hand.palmVelocity)
         .applyQuaternion(node.getWorldQuaternion(surfaceQuat).invert());
-      if (palmVelocityLocal.y > -SMASH_SPEED) continue;
 
       const dx = palmLocal.x - unit.roach.root.position.x;
       const dz = palmLocal.z - unit.roach.root.position.z;
-      if (dx * dx + dz * dz > SMASH_RADIUS * SMASH_RADIUS) continue;
+      const near = dx * dx + dz * dz <= SMASH_RADIUS * SMASH_RADIUS;
+
+      // 면 가까이서 바퀴 위를 지나갈 때마다 값을 찍는다. 문턱을 실제 손동작에
+      // 맞추려면 어떤 숫자가 나오는지부터 봐야 한다. 임시.
+      if (near) {
+        smashProbe += dt;
+        if (smashProbe > 0.3) {
+          smashProbe = 0;
+          log(
+            `손바닥 위: 높이 ${palmLocal.y.toFixed(3)} · 지금 ${(-palmVelocityLocal.y).toFixed(2)}` +
+              ` · 최고 ${hand.peakSpeed.toFixed(2)}`,
+          );
+        }
+      }
+
+      if (!near) continue;
+      // 지금은 '면 쪽으로 가고 있다'만 본다. 세기는 최근 최고 속력으로 가른다.
+      if (palmVelocityLocal.y > 0) continue;
+      if (hand.peakSpeed < SMASH_SPEED) continue;
 
       unit.roach.squash();
       log(`${units.indexOf(unit)}번 짜부러짐`);
@@ -1146,7 +1164,7 @@ renderer.setAnimationLoop((time, frame) => {
     if (handSpace !== null) {
       handTracker.update(frame, handSpace, dt);
       applyTouches();
-      applySmashes();
+      applySmashes(dt);
     }
   }
 

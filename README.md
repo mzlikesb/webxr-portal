@@ -4,6 +4,22 @@ Quest 3 브라우저에서 도는 WebXR 작품. 패스스루로 보이는 **진�
 
 **데모: https://mr-wall-portal.pages.dev** — Quest 3 브라우저에서 열 것. 다른 기기에서는 "immersive-ar 미지원"만 뜬다.
 
+![포털에서 나온 바퀴벌레들이 벽을 타고 내려온다](docs/demo.gif)
+
+> 2026-11-25 Quest 3에서 촬영한 임시 캡처다. 아래 '작업 중'에 적은 것들이
+> 그 뒤로 바뀌었으므로, 작업이 끝나면 다시 찍어 교체한다.
+
+## 작업 중 — 바퀴벌레 (`roach` 브랜치)
+
+위 GIF에 나오는 바퀴벌레는 이 브랜치의 작업이고 아직 이 문서에 설명되어 있지
+않다. 포털에서 나와 아래턱을 넘고 벽을 타고 내려와 방 바닥까지 간다.
+`main`은 포털 단독으로 완결된 상태이고, 바퀴 쪽이 안정되면 합치면서 이 문서를
+'포털 + 바퀴'로 다시 쓴다.
+
+새로 들어온 것: `src/roach.ts`(몸과 걸음), `src/walk-surface.ts`(걸을 수 있는
+면과 그 사이의 모서리), `src/instance-batch.ts`(부품을 조합별로 묶어 그리기),
+`src/portal-crossing.ts`(포털 평면을 가로지르는 물체).
+
 ## 써 보기
 
 1. Quest 3 브라우저에서 위 링크를 연다
@@ -109,6 +125,19 @@ adb tcpip 5555
 adb connect <헤드셋-IP>:5555
 adb reverse tcp:5173 tcp:5173
 ```
+
+### 데모 GIF 다시 만들기
+
+헤드셋에서 녹화한 뒤 `adb pull /sdcard/Oculus/VideoShots/<파일>.mp4`로 가져와서:
+
+```bash
+ffmpeg -ss <시작초> -t 8 -i <녹화>.mp4 -vf "fps=8,scale=480:-1:flags=lanczos,palettegen=stats_mode=diff:max_colors=128" palette.png
+ffmpeg -ss <시작초> -t 8 -i <녹화>.mp4 -i palette.png -lavfi "fps=8,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=4" docs/demo.gif
+```
+
+480px · 8fps · 8초면 3.5MB쯤 나온다. 더 키우면 저장소에 넣기 부담스러워진다 —
+패스스루 영상은 노이즈가 많아 GIF로 잘 줄지 않는다. 원본 mp4는 저장소에 넣지
+않는다.
 
 ## 배포
 

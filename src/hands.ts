@@ -111,14 +111,21 @@ export function makeHandTracker(): HandTracker {
     debug,
 
     update(frame, referenceSpace, dt) {
+      // 직전 프레임에 잡혀 있었는지를 먼저 베껴 둔다.
+      //
+      // tracked를 바로 false로 밀어 놓고 아래에서 그 값을 보면, '방금 잡히기
+      // 시작했다'가 매 프레임 참이 되어 속도가 늘 0으로 리셋된다. 속도를 구하는
+      // 코드는 한 번도 돌지 않았다.
+      const wasTracked = hands.map((hand) => hand.tracked);
       for (const hand of hands) hand.tracked = false;
 
       for (const inputSource of frame.session.inputSources) {
         const xrHand = inputSource.hand;
         if (xrHand === undefined) continue;
 
-        const hand = hands.find((h) => h.handedness === inputSource.handedness);
-        if (hand === undefined) continue;
+        const index = hands.findIndex((h) => h.handedness === inputSource.handedness);
+        if (index < 0) continue;
+        const hand = hands[index];
 
         // 손바닥: 손목과 중지 중수골의 중점.
         const haveWrist = readJoint(frame, referenceSpace, xrHand, 'wrist', wristPoint);
@@ -133,7 +140,7 @@ export function makeHandTracker(): HandTracker {
 
         newPalm.addVectors(wristPoint, metacarpalPoint).multiplyScalar(0.5);
 
-        if (hand.tracked === false && dt > 0) {
+        if (!wasTracked[index] && dt > 0) {
           // 막 잡히기 시작했다. 직전 위치가 없으므로 속도는 0에서 시작한다.
           hand.palmVelocity.set(0, 0, 0);
           hand.peakSpeed = 0;

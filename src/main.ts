@@ -10,7 +10,12 @@ import {
 } from './portal-crossing';
 import type { PortalCrossing } from './portal-crossing';
 import { makeInstanceBatch } from './instance-batch';
-import { makeWalkSurface, orientSurface, transferIfCrossed } from './walk-surface';
+import {
+  linkSurfaces,
+  makeWalkSurface,
+  orientSurface,
+  transferIfCrossed,
+} from './walk-surface';
 import type { WalkSurface } from './walk-surface';
 
 // ---------------------------------------------------------------------------
@@ -624,16 +629,27 @@ const wallFace = makeWalkSurface(scene);
 const roomFloor = makeWalkSurface(scene);
 
 // 모서리는 양방향이다. 나올 때 지나온 길을 그대로 되짚어 올라갈 수 있다.
-corridorFloor.next = wallFace;
-corridorFloor.exitZ = 0; // 아래턱을 넘으면 벽면으로
-wallFace.prev = corridorFloor;
-// 벽면에서 아래턱 위로 올라가는 건 구멍 폭 안에서만 된다. 그 밖은 벽이다.
-wallFace.backHalfWidth = PORTAL_WIDTH / 2;
+//
+// 아래턱: 복도 바닥의 +Z 끝과 벽면의 -Z 끝이 만난다.
+// 벽면에서 위로 올라가는 건 구멍 폭 안에서만 된다 — 그 밖은 막힌 벽이다.
+linkSurfaces(
+  corridorFloor,
+  { axis: 'z', sign: 1, at: 0, halfWidth: Infinity },
+  wallFace,
+  { axis: 'z', sign: -1, at: 0, halfWidth: PORTAL_WIDTH / 2 },
+);
 
-wallFace.next = roomFloor; // 벽을 다 내려오면 방 바닥으로 (높이는 아래에서)
-roomFloor.prev = wallFace;
-// 벽은 좌우로 이어지므로 어디서든 타고 오를 수 있다.
-roomFloor.backHalfWidth = 2;
+// 걸레받이: 벽면의 +Z 끝(= 바닥까지의 낙차)과 방 바닥의 -Z 끝이 만난다.
+// 낙차는 포털을 놓은 높이에 따라 달라지므로 layOutSurfaces에서 채운다.
+const skirtingEdge = { axis: 'z' as const, sign: 1 as const, at: 1, halfWidth: Infinity };
+linkSurfaces(wallFace, skirtingEdge, roomFloor, {
+  axis: 'z',
+  sign: -1,
+  at: 0,
+  halfWidth: Infinity,
+});
+/** 위에서 만든 '벽면 → 방 바닥' 모서리. 낙차가 정해지면 at을 고친다. */
+const wallToFloor = wallFace.edges[wallFace.edges.length - 1];
 
 // 세 면 모두 +Z가 '계속 가는 쪽'이다.
 // 복도에서는 구멍 밖, 벽에서는 아래로, 바닥에서는 벽에서 멀어지는 쪽.
@@ -705,9 +721,20 @@ function resetRoaches(): void {
   }
 }
 
+/**
+ * 앞쪽(+Z)으로 나가는 모서리가 어디쯤인지. 경계 조향을 그쪽에서만 풀어 주려고
+ * 바퀴에게 알려 준다. 그런 모서리가 없으면 null.
+ */
+function forwardExitOf(surface: WalkSurface): number | null {
+  for (const edge of surface.edges) {
+    if (edge.axis === 'z' && edge.sign === 1 && edge.halfWidth > 0) return edge.at;
+  }
+  return null;
+}
+
 /** 지금 올라서 있는 면의 설정을 바퀴에게 적용한다. */
 function applySurface(unit: RoachUnit): void {
-  unit.roach.setExitZ(unit.surface.exitZ);
+  unit.roach.setExitZ(forwardExitOf(unit.surface));
   unit.roach.setBounds(unit.surface.boundCenterZ, unit.surface.boundRadius);
   unit.roach.setDrift(unit.surface.drift);
   unit.roach.setBackLimit(unit.surface.backLimitZ, unit.surface.backHalfWidth);
@@ -758,9 +785,10 @@ function layOutSurfaces(): void {
   orientSurface(roomFloor.node, WORLD_UP, portalNormal);
 
   // 아래턱에서 바닥까지의 거리. 벽면의 로컬 +Z가 아래를 향하므로 그대로 쓴다.
-  // 포털을 아주 낮게 걸면 내려갈 벽이 없다. 그때는 출구를 없앤다.
+  // 포털을 아주 낮게 걸면 내려갈 벽이 없다. 그때는 모서리를 닫는다.
   const dropHeight = sill.y;
-  wallFace.exitZ = dropHeight > 0.05 ? dropHeight : null;
+  wallToFloor.at = dropHeight;
+  wallToFloor.halfWidth = dropHeight > 0.05 ? Infinity : 0;
   wallFace.boundCenterZ = dropHeight / 2;
   wallFace.boundRadius = dropHeight / 2 + 0.12;
   // 아래턱 위는 벽이 아니라 구멍이다. 구멍 폭 밖에서 넘어가면 허공을 걷게 되니
@@ -819,7 +847,7 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
 
   // 복도 깊은 곳에 흩어 둔다. 줄 세워 놓으면 한눈에 '배치했구나' 싶어진다.
   scatterInLurk(roach);
-  roach.setExitZ(corridorFloor.exitZ);
+  roach.setExitZ(forwardExitOf(corridorFloor));
   roach.setBounds(corridorFloor.boundCenterZ, corridorFloor.boundRadius);
   roach.setDrift(corridorFloor.drift);
   roach.setBackLimit(corridorFloor.backLimitZ, corridorFloor.backHalfWidth);

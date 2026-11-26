@@ -997,7 +997,9 @@ const SESSION_INIT: XRSessionInit = {
   // 여기 있는 건 '있으면 켜 줘'. required에 넣으면 미지원 기기에서
   // requestSession 자체가 실패한다. ③단계에서 plane-detection이 실제로
   // 켜졌는지는 session.enabledFeatures로 확인한다.
-  optionalFeatures: ['plane-detection', 'anchors', 'hit-test'],
+  // hand-tracking: 손가락 끝으로 건드리거나 손바닥으로 내려치는 데 쓴다.
+  // 관절 위치는 frame.getJointPose로 읽는다.
+  optionalFeatures: ['plane-detection', 'anchors', 'hit-test', 'hand-tracking'],
 };
 
 let currentSession: XRSession | null = null;

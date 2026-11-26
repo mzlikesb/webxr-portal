@@ -10,6 +10,7 @@ import {
 } from './portal-crossing';
 import type { PortalCrossing } from './portal-crossing';
 import { makeInstanceBatch } from './instance-batch';
+import { makeHandTracker } from './hands';
 import {
   linkSurfaces,
   makeWalkSurface,
@@ -1000,6 +1001,94 @@ layOutSurfaces();
 camera.position.set(1.7, 1.9, 0.7); // 임시: 벽·바닥·책상이 한 화면에 들어오게
 camera.lookAt(0, 0.4, -0.85);
 
+// ---------------------------------------------------------------------------
+// 손
+// ---------------------------------------------------------------------------
+const handTracker = makeHandTracker();
+scene.add(handTracker.debug);
+
+/** 손가락 끝이 이 거리 안으로 들어오면 건드린 것으로 친다(m). */
+const TOUCH_RADIUS = 0.05;
+/** 면에서 이만큼 떨어진 손가락은 아직 닿지 않은 것이다(m). */
+const TOUCH_HEIGHT = 0.07;
+
+/** 손바닥이 이 속도보다 빠르게 면으로 내리꽂히면 내려친 것이다(m/s). */
+const SMASH_SPEED = 1.2;
+/** 내려칠 때 손바닥이 면에서 이 거리 안이어야 한다(m). */
+const SMASH_HEIGHT = 0.09;
+/** 손바닥에 깔리는 범위(m). */
+const SMASH_RADIUS = 0.07;
+
+const tipLocal = new THREE.Vector3();
+const palmLocal = new THREE.Vector3();
+const palmVelocityLocal = new THREE.Vector3();
+const surfaceQuat = new THREE.Quaternion();
+let handsSeen = false;
+
+/** 손가락 끝에 닿은 바퀴를 놀래킨다. */
+function applyTouches(): void {
+  for (const hand of handTracker.hands) {
+    if (!hand.tracked) continue;
+
+    if (!handsSeen) {
+      handsSeen = true;
+      log('손 추적 들어옴');
+    }
+
+    for (const tip of hand.tips) {
+      for (const unit of units) {
+        tipLocal.copy(tip);
+        unit.surface.node.worldToLocal(tipLocal);
+
+        // 면에서 떠 있는 손은 아직 닿은 게 아니다. 바닥 위 50cm에서 흔드는
+        // 손이 그 아래 바퀴를 놀래키면 안 된다.
+        if (Math.abs(tipLocal.y) > TOUCH_HEIGHT) continue;
+
+        const dx = tipLocal.x - unit.roach.root.position.x;
+        const dz = tipLocal.z - unit.roach.root.position.z;
+        if (dx * dx + dz * dz > TOUCH_RADIUS * TOUCH_RADIUS) continue;
+
+        unit.roach.scare(tipLocal.x, tipLocal.z);
+      }
+    }
+  }
+}
+
+/**
+ * 손바닥으로 내려친 자리의 바퀴를 짜부러뜨린다.
+ *
+ * '빠르게' + '면 가까이' 두 가지를 같이 본다. 속도만 보면 허공에서 손을 휘둘러도
+ * 걸리고, 거리만 보면 천천히 손을 짚어도 죽는다. 면의 법선 방향 속도를 보므로
+ * 벽이든 바닥이든 책상이든 같은 코드로 판정된다.
+ */
+function applySmashes(): void {
+  for (const hand of handTracker.hands) {
+    if (!hand.tracked) continue;
+
+    for (const unit of units) {
+      if (unit.roach.isSquashed()) continue;
+
+      const node = unit.surface.node;
+      palmLocal.copy(hand.palm);
+      node.worldToLocal(palmLocal);
+      if (Math.abs(palmLocal.y) > SMASH_HEIGHT) continue;
+
+      // 속도는 방향만 바꾼다 — 위치처럼 원점을 빼면 안 된다.
+      palmVelocityLocal
+        .copy(hand.palmVelocity)
+        .applyQuaternion(node.getWorldQuaternion(surfaceQuat).invert());
+      if (palmVelocityLocal.y > -SMASH_SPEED) continue;
+
+      const dx = palmLocal.x - unit.roach.root.position.x;
+      const dz = palmLocal.z - unit.roach.root.position.z;
+      if (dx * dx + dz * dz > SMASH_RADIUS * SMASH_RADIUS) continue;
+
+      unit.roach.squash();
+      log(`${units.indexOf(unit)}번 짜부러짐`);
+    }
+  }
+}
+
 const viewerPosition = new THREE.Vector3();
 /** 위 값을 면 로컬로 옮긴 것. 마리마다 면이 달라 매번 다시 만든다. */
 const viewerLocal = new THREE.Vector3();
@@ -1052,6 +1141,15 @@ renderer.setAnimationLoop((time, frame) => {
     }
   }
 
+  if (frame !== undefined) {
+    const handSpace = renderer.xr.getReferenceSpace();
+    if (handSpace !== null) {
+      handTracker.update(frame, handSpace, dt);
+      applyTouches();
+      applySmashes();
+    }
+  }
+
   const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);
 
   // ── 서로 비키기 ──
@@ -1063,6 +1161,7 @@ renderer.setAnimationLoop((time, frame) => {
       const a = units[i];
       const b = units[j];
       if (a.surface !== b.surface) continue;
+      if (a.roach.isSquashed() || b.roach.isSquashed()) continue;
 
       const dx = a.roach.root.position.x - b.roach.root.position.x;
       const dz = a.roach.root.position.z - b.roach.root.position.z;
@@ -1079,6 +1178,9 @@ renderer.setAnimationLoop((time, frame) => {
     unit.surface.node.worldToLocal(viewerLocal);
 
     unit.roach.update(dt, speedScale, viewerLocal);
+
+    // 짜부러진 놈은 그 자리에 그대로 둔다.
+    if (unit.roach.isSquashed()) continue;
 
     // 모서리를 넘었으면 다음 면으로 옮긴다.
     const next = transferIfCrossed(unit.roach, unit.surface);

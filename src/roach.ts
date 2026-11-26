@@ -167,6 +167,10 @@ export interface Roach {
   update(dt: number, speedScale: number, threat: THREE.Vector3 | null): void;
   /** 밖에서 강제로 놀래킨다. 위치는 땅 공간. */
   scare(x: number, z: number): void;
+  /** 납작하게 짜부러뜨린다. 되돌아오지 않는다. */
+  squash(): void;
+  /** 이미 짜부러졌는지. 밖에서 더 건드릴 필요가 없다. */
+  isSquashed(): boolean;
   /**
    * 이 자리를 피해 간다. 같은 면 위의 다른 바퀴를 넘겨주면 서로 비킨다.
    * 한 프레임짜리 밀침이라 매 프레임 다시 불러야 한다.
@@ -568,7 +572,7 @@ export function makeRoach(): Roach {
   // 돌아다니다가, 위협이 다가오면 '얼어붙고', 그 다음 '튄다'.
   // 얼어붙는 단계가 핵심이다. 바로 도망가게 하면 그냥 빠른 물체로 보이는데,
   // 0.2초쯤 완전히 멎었다가 터지듯 달리면 그제서야 벌레처럼 보인다.
-  type State = 'wander' | 'startle' | 'flee' | 'groom';
+  type State = 'wander' | 'startle' | 'flee' | 'groom' | 'squashed';
   let state: State = 'wander';
   /** 지금 상태가 끝날 때까지 남은 시간. */
   let stateTimer = 0;
@@ -615,6 +619,8 @@ export function makeRoach(): Roach {
   /** 이번 프레임에 비켜야 할 방향의 합. 매 프레임 비운다. */
   let avoidX = 0;
   let avoidZ = 0;
+  /** 짜부러지는 진행도. 0에서 1로 간다. */
+  let squashT = 0;
 
   const angles: JointAngles = { femurAngle: 0, kneeAngle: 0 };
 
@@ -888,8 +894,43 @@ export function makeRoach(): Roach {
     if (distance < SCARE_RADIUS && approach > SCARE_APPROACH) scare(threat.x, threat.z);
   }
 
+  /**
+   * 짜부러진 자세.
+   *
+   * IK를 건너뛴다. 발이 어디 있어야 하는지가 더는 의미 없고, 다리는 눌려서
+   * 바깥으로 벌어진 채 굳는다. 몸은 위아래로 눌리고 옆으로 퍼진다.
+   */
+  function poseSquashed(dt: number): void {
+    squashT = Math.min(1, squashT + dt * 8);
+    const t = squashT * squashT * (3 - 2 * squashT);
+
+    model.scale.set(
+      ROACH_LENGTH * (1 + 0.22 * t),
+      ROACH_LENGTH * (1 - 0.8 * t),
+      ROACH_LENGTH * (1 + 0.18 * t),
+    );
+
+    body.position.y = -0.03 * t;
+    body.rotation.set(0, 0, 0);
+
+    for (const leg of legs) {
+      // 쉬는 방향보다 더 벌어진 채로 눌린다.
+      leg.hip.rotation.y = leg.restYaw + leg.side * 0.35 * t;
+      leg.femur.rotation.z = leg.femur.rotation.z * (1 - t) + -0.05 * t;
+      leg.knee.rotation.z = leg.knee.rotation.z * (1 - t) + -0.1 * t;
+      leg.tarsus.rotation.z = leg.tarsus.rotation.z * (1 - t);
+    }
+  }
+
   function update(dt: number, speedScale: number, threat: THREE.Vector3 | null): void {
     if (dt <= 0) return;
+
+    if (state === 'squashed') {
+      poseSquashed(dt);
+      avoidX = 0;
+      avoidZ = 0;
+      return;
+    }
 
     senseThreat(dt, threat);
     behave(dt);
@@ -1103,6 +1144,17 @@ export function makeRoach(): Roach {
     root,
     update,
     scare,
+    squash() {
+      if (state === 'squashed') return;
+      state = 'squashed';
+      speed = 0;
+      targetSpeed = 0;
+      turnRate = 0;
+      // 발 자국은 이제 쓰이지 않는다. 다리는 IK 대신 눌린 자세로 굳는다.
+    },
+    isSquashed() {
+      return state === 'squashed';
+    },
     avoid(x, z) {
       const dx = root.position.x - x;
       const dz = root.position.z - z;

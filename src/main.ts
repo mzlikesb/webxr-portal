@@ -1063,48 +1063,65 @@ function applyTouches(): void {
  * 벽이든 바닥이든 책상이든 같은 코드로 판정된다.
  */
 function applySmashes(dt: number): void {
+  // 가장 가까웠던 조합. 아무것도 안 맞아도 숫자가 나와야 문턱을 맞출 수 있다.
+  let bestDistance = Infinity;
+  let bestHeight = 0;
+  let bestPeak = 0;
+  let anyHand = false;
+
   for (const hand of handTracker.hands) {
     if (!hand.tracked) continue;
+    anyHand = true;
 
-    for (const unit of units) {
-      if (unit.roach.isSquashed()) continue;
+    // 손바닥 하나가 아니라 손 전체로 친다.
+    //
+    // 손바닥 중심은 손목과 중수골의 중점이라 손가락 끝보다 한참 뒤에 있다.
+    // 사람은 벌레를 손가락 쪽으로 겨냥해 때리므로, 손바닥만 보면 영영 안 맞는다.
+    for (const point of [hand.palm, ...hand.tips]) {
+      for (const unit of units) {
+        if (unit.roach.isSquashed()) continue;
 
-      const node = unit.surface.node;
-      palmLocal.copy(hand.palm);
-      node.worldToLocal(palmLocal);
-      if (Math.abs(palmLocal.y) > SMASH_HEIGHT) continue;
+        const node = unit.surface.node;
+        palmLocal.copy(point);
+        node.worldToLocal(palmLocal);
 
-      // 속도는 방향만 바꾼다 — 위치처럼 원점을 빼면 안 된다.
-      palmVelocityLocal
-        .copy(hand.palmVelocity)
-        .applyQuaternion(node.getWorldQuaternion(surfaceQuat).invert());
+        const dx = palmLocal.x - unit.roach.root.position.x;
+        const dz = palmLocal.z - unit.roach.root.position.z;
+        const distance = Math.hypot(dx, dz);
 
-      const dx = palmLocal.x - unit.roach.root.position.x;
-      const dz = palmLocal.z - unit.roach.root.position.z;
-      const near = dx * dx + dz * dz <= SMASH_RADIUS * SMASH_RADIUS;
-
-      // 면 가까이서 바퀴 위를 지나갈 때마다 값을 찍는다. 문턱을 실제 손동작에
-      // 맞추려면 어떤 숫자가 나오는지부터 봐야 한다. 임시.
-      if (near) {
-        smashProbe += dt;
-        if (smashProbe > 0.3) {
-          smashProbe = 0;
-          log(
-            `손바닥 위: 높이 ${palmLocal.y.toFixed(3)} · 지금 ${(-palmVelocityLocal.y).toFixed(2)}` +
-              ` · 최고 ${hand.peakSpeed.toFixed(2)}`,
-          );
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestHeight = palmLocal.y;
+          bestPeak = hand.peakSpeed;
         }
+
+        if (Math.abs(palmLocal.y) > SMASH_HEIGHT) continue;
+        if (distance > SMASH_RADIUS) continue;
+
+        // 속도는 방향만 바꾼다 — 위치처럼 원점을 빼면 안 된다.
+        palmVelocityLocal
+          .copy(hand.palmVelocity)
+          .applyQuaternion(node.getWorldQuaternion(surfaceQuat).invert());
+        // 지금은 '면 쪽으로 가고 있다'만 본다. 세기는 최근 최고 속력으로 가른다.
+        if (palmVelocityLocal.y > 0) continue;
+        if (hand.peakSpeed < SMASH_SPEED) continue;
+
+        unit.roach.squash();
+        log(`${units.indexOf(unit)}번 짜부러짐`);
       }
-
-      if (!near) continue;
-      // 지금은 '면 쪽으로 가고 있다'만 본다. 세기는 최근 최고 속력으로 가른다.
-      if (palmVelocityLocal.y > 0) continue;
-      if (hand.peakSpeed < SMASH_SPEED) continue;
-
-      unit.roach.squash();
-      log(`${units.indexOf(unit)}번 짜부러짐`);
     }
   }
+
+  // 손이 보이는 동안은 계속 찍는다. 빗나가도 얼마나 빗나갔는지가 남아야 한다.
+  // 임시.
+  if (!anyHand) return;
+  smashProbe += dt;
+  if (smashProbe < 0.5) return;
+  smashProbe = 0;
+  log(
+    `손: 가장 가까운 바퀴 ${bestDistance.toFixed(3)}m` +
+      ` · 면에서 ${bestHeight.toFixed(3)}m · 최고속력 ${bestPeak.toFixed(2)}`,
+  );
 }
 
 const viewerPosition = new THREE.Vector3();

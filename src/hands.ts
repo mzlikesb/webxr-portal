@@ -6,13 +6,26 @@ import * as THREE from 'three';
 // 컨트롤러는 포즈 하나지만 손은 관절 스물다섯 개다. frame.getJointPose로 하나씩
 // 읽는다. 세션이 hand-tracking을 못 받았거나 손이 시야 밖이면 아무것도 안 온다.
 //
-// 여기서 필요한 건 둘뿐이다.
+// 여기서 필요한 건 셋이다.
 //   · 손가락 끝 — 건드렸는지
 //   · 손바닥과 그 속도 — 내려쳤는지
+//   · 손바닥이 보는 쪽 — 디버그 패널을 띄울지
 //
 // 손바닥 관절은 따로 없다. 손목과 중지 중수골의 중점을 손바닥으로 친다.
 // 속도는 포즈에 들어 있지 않아 프레임 간 차이로 직접 구한다.
+//
+// 손바닥의 방향도 관절 하나로는 안 나온다. 관절 포즈에 회전이 들어 있긴
+// 하지만, 그 좌표계의 어느 축이 손바닥 밖을 향하는지는 기억에 기대고 싶지
+// 않은 종류의 약속이다. 대신 손목·검지 중수골·새끼 중수골 세 점으로 기저를
+// 직접 세운다. 세 점이면 평면이 정해지고, 거기엔 약속이 필요 없다.
 // ---------------------------------------------------------------------------
+
+/** 손바닥 평면을 정하는 세 점. 손목에서 두 중수골로 뻗는다. */
+const PALM_JOINTS = [
+  'wrist',
+  'index-finger-metacarpal',
+  'pinky-finger-metacarpal',
+] as const satisfies readonly XRHandJoint[];
 
 const FINGER_TIPS = [
   'thumb-tip',
@@ -30,6 +43,17 @@ export interface TrackedHand {
   tips: THREE.Vector3[];
   /** 손바닥 중심(월드). */
   palm: THREE.Vector3;
+  /**
+   * 손바닥이 보는 쪽(월드, 단위). 손등이 아니라 바닥에서 나오는 쪽이다.
+   *
+   * 손목에서 검지 중수골로, 손목에서 새끼 중수골로 뻗은 두 벡터의 외적이다.
+   * 왼손을 펴서 얼굴 쪽으로 돌리면 검지 쪽이 오른쪽, 새끼 쪽이 왼쪽이고,
+   * 오른손 법칙으로 외적은 얼굴 쪽을 향한다. 오른손은 두 쪽이 뒤바뀌므로
+   * 부호를 뒤집어 준다.
+   */
+  palmNormal: THREE.Vector3;
+  /** 손바닥 평면 위에서 손가락 쪽(월드, 단위). 패널의 위쪽으로 쓴다. */
+  palmUp: THREE.Vector3;
   /** 손바닥 속도(월드, m/s). 프레임 차이로 구한 뒤 약간 다듬었다. */
   palmVelocity: THREE.Vector3;
   /**
@@ -55,6 +79,8 @@ function makeHand(handedness: 'left' | 'right'): TrackedHand {
     tracked: false,
     tips: FINGER_TIPS.map(() => new THREE.Vector3()),
     palm: new THREE.Vector3(),
+    palmNormal: new THREE.Vector3(0, 1, 0),
+    palmUp: new THREE.Vector3(0, 0, -1),
     palmVelocity: new THREE.Vector3(),
     peakSpeed: 0,
   };
@@ -64,6 +90,9 @@ const wristPoint = new THREE.Vector3();
 const metacarpalPoint = new THREE.Vector3();
 const newPalm = new THREE.Vector3();
 const rawVelocity = new THREE.Vector3();
+const palmPoints = PALM_JOINTS.map(() => new THREE.Vector3());
+const towardIndex = new THREE.Vector3();
+const towardPinky = new THREE.Vector3();
 
 export function makeHandTracker(): HandTracker {
   const hands = [makeHand('left'), makeHand('right')];
@@ -155,6 +184,23 @@ export function makeHandTracker(): HandTracker {
         }
 
         hand.palm.copy(newPalm);
+
+        // 손바닥 평면. 세 점이 다 안 잡히면 직전 값을 그대로 둔다.
+        const havePalm = PALM_JOINTS.every((name, j) =>
+          readJoint(frame, referenceSpace, xrHand, name, palmPoints[j]),
+        );
+        if (havePalm) {
+          towardIndex.subVectors(palmPoints[1], palmPoints[0]);
+          towardPinky.subVectors(palmPoints[2], palmPoints[0]);
+          hand.palmNormal
+            .crossVectors(towardIndex, towardPinky)
+            .multiplyScalar(hand.handedness === 'left' ? 1 : -1)
+            .normalize();
+          // 손가락 쪽. 두 중수골의 중점이 손목에서 뻗은 방향이다. 둘 다
+          // 손바닥 평면 위의 벡터라 그 평균도 평면 위에 있다 — 따로 눕힐
+          // 필요가 없다.
+          hand.palmUp.addVectors(towardIndex, towardPinky).normalize();
+        }
 
         FINGER_TIPS.forEach((name, i) => {
           readJoint(frame, referenceSpace, xrHand, name, hand.tips[i]);

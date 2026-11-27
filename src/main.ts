@@ -11,6 +11,8 @@ import {
 import type { PortalCrossing } from './portal-crossing';
 import { makeInstanceBatch } from './instance-batch';
 import { makeHandTracker } from './hands';
+import { makeDebugPanel } from './debug-panel';
+import { fakeHands, setFakeFingertip, updateFakeHands } from './fake-hands';
 import { fakeRoomFrame, fakeRoomSpace } from './fake-room';
 import { makeRoomShell } from './room-shell';
 import type { ShellSurface } from './room-shell';
@@ -104,6 +106,19 @@ window.addEventListener('resize', () => {
  *  참조가 유지된다. 그래서 Map의 키로 쓸 수 있다. */
 const planeMeshes = new Map<XRPlane, THREE.Mesh>();
 
+/**
+ * 평면 오버레이를 켜 둘지.
+ *
+ * 벽을 고르는 동안에는 켜 둬야 어디를 가리키는지 보이고, 포털을 놓으면 꺼야
+ * 포털 앞을 가리지 않는다. 그 뒤로는 손바닥 패널에서 다시 켤 수 있다 —
+ * 세션 안에서 '지금 뭐가 잡혔는지' 볼 유일한 길이다.
+ */
+let showPlanes = true;
+
+function applyPlaneVisibility(): void {
+  for (const mesh of planeMeshes.values()) mesh.visible = showPlanes;
+}
+
 /** 평면의 모양이 언제 갱신됐는지. Quest는 스캔을 하면서 폴리곤을 계속 다듬는다. */
 const planeShapeTimes = new Map<XRPlane, DOMHighResTimeStamp>();
 
@@ -151,8 +166,8 @@ function buildPlaneMesh(plane: XRPlane): THREE.Mesh {
   });
 
   const mesh = new THREE.Mesh(buildPlaneGeometry(plane), material);
-  // 포털이 확정된 뒤에 새로 들어오는 평면도 숨겨 둔다.
-  mesh.visible = portalPlaced === false;
+  // 나중에 들어오는 평면도 지금 설정을 따른다.
+  mesh.visible = showPlanes;
   return mesh;
 }
 
@@ -416,8 +431,9 @@ function placePortal(): void {
   portalEdgeMaterial.color.setHex(0xffcc33);
 
   // 평면 시각화는 디버그용이었다. 켜 둔 채로 두면 벽 오버레이가 포털 앞을
-  // 가린다.
-  for (const mesh of planeMeshes.values()) mesh.visible = false;
+  // 가린다. 다시 보고 싶으면 손바닥 패널에서 켠다.
+  showPlanes = false;
+  applyPlaneVisibility();
 
   log(`포털 확정: ${portalPoint.x.toFixed(2)}, ${portalPoint.y.toFixed(2)}, ${portalPoint.z.toFixed(2)}`);
 }
@@ -1129,13 +1145,19 @@ function aimPortalWallDown(): void {
 }
 
 
-/** [임시] 새로 생긴 껍데기 면에 격자를 깔아 눈으로 확인한다. */
+/** 껍데기 면에 깔아 둔 격자들. 손바닥 패널에서 껐다 켠다. */
+const shellGrids: THREE.GridHelper[] = [];
+let showGrids = true;
+
+/** 새로 생긴 껍데기 면에 격자를 깔아 눈으로 확인한다. */
 function addShellGrid(shell: ShellSurface): void {
   const size = Math.max(shell.width, shell.depth);
   const grid = new THREE.GridHelper(size, Math.round(size * 10), 0x554433, 0x332222);
   // 격자는 정사각형이다. 사각형 범위에 맞춰 축마다 다르게 줄인다.
   grid.scale.set(shell.width / size, 1, shell.depth / size);
+  grid.visible = showGrids;
   shell.surface.node.add(grid);
+  shellGrids.push(grid);
 }
 
 /**
@@ -1208,6 +1230,66 @@ camera.lookAt(0, 0.4, -0.85);
 // ---------------------------------------------------------------------------
 const handTracker = makeHandTracker();
 scene.add(handTracker.debug);
+
+/** 손 관절 점을 보여 줄지. 데모를 찍을 때는 꺼야 한다. */
+let showHandDots = true;
+
+// ---------------------------------------------------------------------------
+// 손바닥 디버그 패널
+//
+// 세션 안에서는 DOM 로그가 안 보인다. 헤드셋을 쓴 채로 '지금 뭐가 잡혔는지'
+// 볼 길이 이것뿐이다.
+// ---------------------------------------------------------------------------
+const debugPanel = makeDebugPanel([
+  {
+    label: '평면',
+    isOn: () => showPlanes,
+    press: () => {
+      showPlanes = !showPlanes;
+      applyPlaneVisibility();
+    },
+  },
+  {
+    label: '격자',
+    isOn: () => showGrids,
+    press: () => {
+      showGrids = !showGrids;
+      for (const grid of shellGrids) grid.visible = showGrids;
+    },
+  },
+  {
+    label: '손',
+    isOn: () => showHandDots,
+    press: () => {
+      showHandDots = !showHandDots;
+      handTracker.debug.visible = showHandDots;
+    },
+  },
+]);
+scene.add(debugPanel.group);
+
+/** 화면 갱신율. 매 프레임 출렁여서 천천히 따라가게 둔다. */
+let fps = 0;
+
+/**
+ * 잡힌 평면을 라벨별로 센 것. 'wall 4 · door 2'처럼.
+ *
+ * 스캔된 방은 라벨이 열 가지씩 나온다. 한 줄에 다 넣으면 글자가 깨알이 되니
+ * 넷씩 끊어 여러 줄로 돌려준다.
+ */
+function planeSummary(): string[] {
+  const counts = new Map<string, number>();
+  for (const plane of planeMeshes.keys()) {
+    const label = plane.semanticLabel ?? plane.orientation ?? '?';
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  if (counts.size === 0) return ['잡힌 평면 없음'];
+
+  const parts = [...counts].map(([label, n]) => `${label} ${n}`);
+  const rows: string[] = [];
+  for (let i = 0; i < parts.length; i += 4) rows.push(parts.slice(i, i + 4).join(' · '));
+  return rows;
+}
 
 /** 손가락 끝이 이 거리 안으로 들어오면 건드린 것으로 친다(m). */
 const TOUCH_RADIUS = 0.05;
@@ -1302,6 +1384,8 @@ function applySmashes(): void {
 }
 
 const viewerPosition = new THREE.Vector3();
+/** 가짜 손을 눈앞에 세우는 데 쓴다. 미리보기 전용. */
+const viewerQuaternion = new THREE.Quaternion();
 /** 위 값을 면 로컬로 옮긴 것. 마리마다 면이 달라 매번 다시 만든다. */
 const viewerLocal = new THREE.Vector3();
 const viewerForward = new THREE.Vector3();
@@ -1389,6 +1473,26 @@ renderer.setAnimationLoop((time, frame) => {
     }
   }
 
+  // ── 손바닥 디버그 패널 ──
+  //
+  // 세션 밖에서는 가짜 손을 먹인다. 손 추적은 XR에만 와서, 이게 없으면 패널
+  // 코드가 데스크톱에서 한 줄도 안 돈다 — 맞는지 틀렸는지 알 수가 없다.
+  // 가짜 방 평면과 같은 발판이다.
+  let panelHands = handTracker.hands;
+  if (frame === undefined) {
+    viewer.getWorldQuaternion(viewerQuaternion);
+    updateFakeHands(viewerPosition, viewerQuaternion);
+    panelHands = fakeHands;
+  }
+
+  if (dt > 0) fps += (1 / dt - fps) * Math.min(1, dt * 3);
+  debugPanel.setLines([
+    `${fps.toFixed(0)} fps · 평면 ${planeMeshes.size}개`,
+    `껍데기 ${roomShell.surfaces.length}면 · 모서리 ${roomShell.edgeCount}개`,
+    ...planeSummary(),
+  ]);
+  debugPanel.update(panelHands, viewerPosition);
+
   const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);
 
   // ── 서로 비키기 ──
@@ -1457,11 +1561,14 @@ renderer.setAnimationLoop((time, frame) => {
   // 자세가 다 정해진 뒤에 행렬을 모은다. render보다 먼저여야 한다.
   roachBatch.sync();
 
+  // 평면 오버레이도 가짜 방을 먹인다. 세션 밖에서 안 돌면 '평면' 버튼이
+  // 무엇을 켜고 끄는지 데스크톱에서 볼 수가 없다.
+  if (shellSpace !== null) updatePlanes(shellFrame, shellSpace);
+
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();
-    if (referenceSpace !== null) {
-      updatePlanes(frame, referenceSpace);
-      if (portalPlaced === false) updatePortalPreview(frame, referenceSpace);
+    if (referenceSpace !== null && portalPlaced === false) {
+      updatePortalPreview(frame, referenceSpace);
     }
   }
 
@@ -1488,6 +1595,22 @@ renderer.setAnimationLoop((time, frame) => {
 // [임시] 미리보기에서 바퀴가 범위 안에 있는지 콘솔로 확인하려고 둔 창구.
 // 합치기 전에 지운다.
 Object.assign(window, {
+  // [임시] 손바닥 패널의 버튼을 눌러 보는 창구. 미리보기에는 진짜 손가락이
+  // 없어서, 패널 로컬 좌표(미터)를 받아 가짜 검지를 거기 갖다 댄다.
+  poke: (index = 0) => {
+    const point = debugPanel.buttonPoint(index, new THREE.Vector3());
+    debugPanel.group.localToWorld(point);
+    setFakeFingertip(point.x, point.y, point.z);
+    return { 평면: showPlanes, 격자: showGrids, 손: showHandDots };
+  },
+  unpoke: () => {
+    setFakeFingertip(0, -99, 0);
+    return { 평면: showPlanes, 격자: showGrids, 손: showHandDots };
+  },
+  panel: () => ({
+    보임: debugPanel.group.visible,
+    자리: debugPanel.group.position.toArray().map((c) => +c.toFixed(2)),
+  }),
   // [임시] 껍데기 면들의 자리와 법선. 전부 방 안쪽을 봐야 한다.
   shell: () =>
     roomShell.surfaces.map((s) => {

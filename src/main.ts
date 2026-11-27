@@ -14,8 +14,8 @@ import { makeHandTracker } from './hands';
 import { makeDebugPanel } from './debug-panel';
 import { fakeHands, setFakeFingertip, updateFakeHands } from './fake-hands';
 import { fakeRoomFrame, fakeRoomSpace } from './fake-room';
-import { makeRoomShell } from './room-shell';
-import type { ShellSurface } from './room-shell';
+import { boundingRect, makeRoomShell } from './room-shell';
+import type { JoinRect, ShellSurface } from './room-shell';
 import {
   linkSurfaces,
   makeWalkSurface,
@@ -446,6 +446,8 @@ function placePortal(): void {
   if (portalPlaced) return;
 
   portalPlaced = true;
+  // 면들이 통째로 옮겨 간다. 방과 만나는 자리를 다시 구해야 한다.
+  needsRelink = true;
   pointerRay.visible = false;
 
   // 미리보기를 끄고 진짜 포털을 켠다.
@@ -830,9 +832,20 @@ beginLurking();
 // 상판과 방 바닥을 잇는다. 한쪽으로 올라가 반대쪽으로 내려오면 바닥으로
 // 되돌아오는 고리가 되는데, 모서리를 목록으로 바꾼 게 이걸 위해서다.
 // ---------------------------------------------------------------------------
+// 스캔이 없는 방을 위한 기본 치수. 감지된 가구가 있으면 그 치수로 바뀐다.
 const TABLE_HALF_X = 0.62; // 감지된 책상이 1.25 x 0.73이었다
 const TABLE_HALF_Z = 0.36;
 const TABLE_HEIGHT = 0.72;
+
+/**
+ * 지금 쓰고 있는 책상 치수.
+ *
+ * 전에는 이게 상수였고, 책상을 포털 앞 45cm에 세웠다. 스캔된 방에서는 그게
+ * 진짜 책상과 아무 상관이 없는 자리라, 헤드셋에서는 바퀴가 허공을 타고
+ * 올라가는 것으로 보였다 — AR에서는 책상 격자를 끄기 때문에 탈 것이 아예
+ * 안 보인다. 이제 감지된 가구 평면을 찾아 거기에 세우고, 치수도 따라간다.
+ */
+const table = { halfX: TABLE_HALF_X, halfZ: TABLE_HALF_Z, height: TABLE_HEIGHT };
 
 const tableTop = makeWalkSurface(scene);
 /** +X, -X, +Z, -Z 순서. 상판의 로컬 축 기준이다. */
@@ -857,6 +870,9 @@ tableTop.hugEdges = true; // 상판은 머무는 곳이다
 tableTop.boundHalfX = TABLE_HALF_X;
 tableTop.boundHalfZ = TABLE_HALF_Z;
 
+/** 각 옆면에서 방 바닥으로 내려가는 모서리. 치수가 바뀌면 같이 고친다. */
+const sideToFloor: SurfaceEdge[] = [];
+
 /** 방 바닥에서 각 옆면으로 올라가는 모서리. 자리는 layOutTable에서 채운다. */
 const floorToSide = tableSides.map((side, i) => {
   const halfAlong = TABLE_SIDE_DIRS[i].nx !== 0 ? TABLE_HALF_Z : TABLE_HALF_X;
@@ -871,7 +887,7 @@ const floorToSide = tableSides.map((side, i) => {
   // 옆면 ↔ 방 바닥: 옆면의 아래 끝. 바닥 쪽 자리는 책상을 놓을 때 정해진다.
   // 바닥에서 올라갈 때는 띠로 잡는다 — 반평면으로 두면 책상 건너편에 있는
   // 바퀴까지 '넘어섰다'로 잡힌다.
-  const [, floorEdge] = linkSurfaces(
+  const [sideEdge, floorEdge] = linkSurfaces(
     side,
     { nx: 0, nz: 1, at: TABLE_HEIGHT, halfWidth: halfAlong },
     roomFloor,
@@ -881,6 +897,7 @@ const floorToSide = tableSides.map((side, i) => {
     // 대신 진행 방향으로 거른다 — 그쪽으로 가고 있을 때만 타고 오른다.
     { nx: 0, nz: 1, at: 0, halfWidth: halfAlong },
   );
+  sideToFloor.push(sideEdge);
   return floorEdge;
 });
 
@@ -892,6 +909,144 @@ const tableQuat = new THREE.Quaternion();
 /** 바닥 자세용으로 따로 둔다. 하나를 돌려 쓰면 반복문 두 번째부터 책상 자세가
  *  바닥 자세로 덮여서, 옆면들이 엉뚱한 방향을 가리킨다. */
 const floorQuat = new THREE.Quaternion();
+
+/**
+ * 걸어 올라갈 만한 가구.
+ *
+ * 선반은 뺀다 — 벽에 붙어 있어 바닥까지 닿는 옆면이 없고, 그 밑으로 옆면을
+ * 세우면 지금 고치려는 '허공 타고 오르기'를 그대로 다시 만드는 셈이다.
+ */
+const CLIMBABLE_LABELS = ['table', 'desk', 'couch', 'bed'];
+/** 상판이 이 높이 안에 있어야 가구로 친다(m). */
+const TABLE_MIN_HEIGHT = 0.2;
+const TABLE_MAX_HEIGHT = 1.2;
+
+/** 책상을 세울 가구 평면. 평면 목록이 바뀔 때만 다시 고른다. */
+let tablePlane: XRPlane | null = null;
+/** 마지막으로 고를 때의 평면 수. 이게 바뀌면 다시 고른다. */
+let lastPlaneCount = -1;
+
+/**
+ * 책상을 세울 가구 평면을 고른다. 없으면 null.
+ *
+ * 넓이로만 고르면 안 된다 — 스캔된 방에서 침대가 1.64 x 2.22, 책상이
+ * 1.25 x 0.73이라 늘 침대가 뽑힌다. 라벨 순서를 먼저 보고, 같은 라벨이
+ * 여럿이면 넓은 쪽을 고른다.
+ */
+function pickTablePlane(): XRPlane | null {
+  for (const label of CLIMBABLE_LABELS) {
+    let best: XRPlane | null = null;
+    let bestArea = 0;
+
+    for (const plane of planeMeshes.keys()) {
+      if (plane.orientation !== 'horizontal') continue;
+      if (plane.semanticLabel !== label) continue;
+
+      const rect = boundingRect(plane);
+      const area = rect.halfX * rect.halfZ;
+      if (area <= bestArea) continue;
+      bestArea = area;
+      best = plane;
+    }
+    if (best !== null) return best;
+  }
+  return null;
+}
+
+const furnitureCenter = new THREE.Vector3();
+const furnitureFacing = new THREE.Vector3();
+
+/** 고른 가구 평면 위에 책상을 세운다. 세웠으면 true. */
+function layOutTableOnFurniture(): boolean {
+  // 평면이 늘거나 줄었으면 다시 고른다. 세션 초반에는 몇 초에 걸쳐 들어오고,
+  // 책상은 벽보다 늦게 잡히는 일이 흔하다.
+  if (planeMeshes.size !== lastPlaneCount || (tablePlane !== null && !planeMeshes.has(tablePlane))) {
+    lastPlaneCount = planeMeshes.size;
+    const next = pickTablePlane();
+    if (next !== tablePlane) {
+      tablePlane = next;
+      needsRelink = true;
+    }
+  }
+
+  if (tablePlane === null) return false;
+  const mesh = planeMeshes.get(tablePlane);
+  if (mesh === undefined) return false;
+
+  const rect = boundingRect(tablePlane);
+  mesh.updateMatrixWorld();
+  furnitureCenter.set(rect.centerX, 0, rect.centerZ).applyMatrix4(mesh.matrixWorld);
+  // 평면은 추적이 다듬어지면서 조금씩 움직인다. 눈에 띄게 움직였을 때만
+  // 모서리를 다시 구한다 — 매 프레임 구하면 그게 바로 아까 그 낭비다.
+  if (furnitureCenter.distanceToSquared(tableCenter) > 0.02 * 0.02) needsRelink = true;
+  // 바닥에 깔린 러그나 천장 근처의 무언가를 책상으로 삼지 않는다.
+  if (furnitureCenter.y < TABLE_MIN_HEIGHT) return false;
+  if (furnitureCenter.y > TABLE_MAX_HEIGHT) return false;
+
+  // 평면의 로컬 +Z를 상판의 '앞'으로 삼는다. 로컬 X/Z 중 어느 쪽이 어느
+  // 변인지는 스펙이 보장하지 않지만, 사각형이라 아무 쪽을 앞으로 잡아도 된다 —
+  // 반폭만 그 축에 맞춰 주면 된다.
+  furnitureFacing.set(0, 0, 1).transformDirection(mesh.matrixWorld);
+  furnitureFacing.y = 0;
+  if (furnitureFacing.lengthSq() < 1e-6) return false;
+  furnitureFacing.normalize();
+
+  resizeTable(rect.halfX, rect.halfZ, furnitureCenter.y);
+  layOutTable(furnitureCenter, furnitureFacing);
+  return true;
+}
+
+/**
+ * 책상 치수를 바꾼다. 범위와 모서리와 격자가 전부 이 셋에 달려 있다.
+ *
+ * 바뀐 게 없으면 아무것도 안 한다. 매 프레임 불리기 때문이다.
+ */
+function resizeTable(halfX: number, halfZ: number, height: number): void {
+  if (
+    Math.abs(halfX - table.halfX) < 0.001 &&
+    Math.abs(halfZ - table.halfZ) < 0.001 &&
+    Math.abs(height - table.height) < 0.001
+  ) {
+    return;
+  }
+
+  table.halfX = halfX;
+  table.halfZ = halfZ;
+  table.height = height;
+
+  tableTop.boundHalfX = halfX;
+  tableTop.boundHalfZ = halfZ;
+  tableRects[0].halfX = halfX;
+  tableRects[0].halfZ = halfZ;
+  // 격자는 만들 때 크기가 박히므로 배율로 고친다. 디버그용이라 대충이 아니라,
+  // 이걸 보고 책상이 제자리에 섰는지 판단하기 때문에 맞아야 한다.
+  surfaceGrids[3].scale.set(halfX / TABLE_HALF_Z, 1, halfZ / TABLE_HALF_Z);
+
+  tableSides.forEach((side, i) => {
+    const halfAlong = TABLE_SIDE_DIRS[i].nx !== 0 ? halfZ : halfX;
+
+    side.boundHalfX = halfAlong;
+    side.boundCenterZ = height / 2;
+    side.boundHalfZ = height / 2;
+
+    sideToFloor[i].at = height;
+    sideToFloor[i].halfWidth = halfAlong;
+    floorToSide[i].halfWidth = halfAlong;
+
+    const rect = tableRects[i + 1];
+    rect.halfX = halfAlong;
+    rect.centerZ = height / 2;
+    rect.halfZ = height / 2;
+
+    const grid = surfaceGrids[4 + i];
+    grid.scale.set((2 * halfAlong) / TABLE_HEIGHT, 1, height / TABLE_HEIGHT);
+    grid.position.z = height / 2;
+  });
+
+  // 치수가 바뀌었으니 방과 만나는 자리도 다시 구해야 한다.
+  needsRelink = true;
+  log(`책상 ${(halfX * 2).toFixed(2)}×${(halfZ * 2).toFixed(2)}m 높이 ${height.toFixed(2)}m`);
+}
 
 /**
  * 책상을 놓는다.
@@ -917,7 +1072,7 @@ function layOutTable(center: THREE.Vector3, facing: THREE.Vector3): void {
 
   tableSides.forEach((side, i) => {
     const dir = TABLE_SIDE_DIRS[i];
-    const halfOut = dir.nx !== 0 ? TABLE_HALF_X : TABLE_HALF_Z;
+    const halfOut = dir.nx !== 0 ? table.halfX : table.halfZ;
 
     // 바깥을 향하는 방향(월드)과 그 변의 중점(월드).
     tableDir.set(dir.nx, 0, dir.nz).applyQuaternion(tableQuat).normalize();
@@ -992,17 +1147,22 @@ function layOutSurfaces(): void {
 
   // 책상은 벽에서 조금 떨어진 자리에 놓는다. 방에서 감지된 'table' 평면에
   // 맞추는 건 다음 단계다 — 지금은 포털 기준으로 둔다.
-  tablePoint
-    .set(sill.x, TABLE_HEIGHT, sill.z)
-    .addScaledVector(portalNormal, TABLE_HALF_Z + 0.45);
-  layOutTable(tablePoint, portalNormal);
+  // 감지된 가구가 있으면 거기에 세운다. 없을 때만 포털 앞에 지어낸다 —
+  // 스캔한 적 없는 방에서도 올라갈 것이 하나는 있어야 한다.
+  if (!layOutTableOnFurniture()) {
+    tablePoint
+      .set(sill.x, table.height, sill.z)
+      .addScaledVector(portalNormal, table.halfZ + 0.45);
+    layOutTable(tablePoint, portalNormal);
+  }
 
   // 방과 다시 잇는 건 여기서 하지 않는다. 이 함수는 포털을 놓은 뒤 매 프레임
   // 도는데(바퀴가 면의 자세를 읽기 전에 자리를 맞춰야 한다), 거기에 모서리
-  // 재생성을 붙여 두었더니 스물네 개를 매 프레임 다시 만들고 로그도 매 프레임
-  // DOM에 붙었다. 쌓이는 문자열을 프레임마다 다시 만드는 비용이 따로 붙는다.
-  // 실제로 바뀐 때만 하도록 깃발만 세운다.
-  needsRelink = true;
+  // 재생성을 붙여 두면 스물네 개를 매 프레임 다시 만들게 된다.
+  //
+  // 깃발도 여기서 세우지 않는다 — 여기서 세우면 매 프레임 서는 것이라 결국
+  // 같다. 포털을 놓을 때(placePortal), 평면이 늘었을 때, 책상이 움직였을 때
+  // 각자 세운다.
 }
 
 /**
@@ -1055,7 +1215,8 @@ const surfaceGrids = [
 // 규칙이 아래쪽(막힌 벽)을 가리킨다. 실제로 그렇게 나왔고, 나온 바퀴가 그
 // 자리에서 곧장 복도로 되돌아가기를 1초에 한 번씩 반복했다.
 // 구멍이 아래턱 위에 있다는 건 포털만 아는 사실이라 아래에서 손으로 적는다.
-const roomShell = makeRoomShell(scene, [
+/** 책상이 방과 만나는 자리를 구할 때 쓰는 사각형들. 치수가 바뀌면 고친다. */
+const tableRects: JoinRect[] = [
   { surface: tableTop, halfX: TABLE_HALF_X, centerZ: 0, halfZ: TABLE_HALF_Z },
   ...tableSides.map((side, i) => ({
     surface: side,
@@ -1063,7 +1224,9 @@ const roomShell = makeRoomShell(scene, [
     centerZ: TABLE_HEIGHT / 2,
     halfZ: TABLE_HEIGHT / 2,
   })),
-]);
+];
+
+const roomShell = makeRoomShell(scene, tableRects);
 
 /** 포털이 걸린 진짜 벽. 못 찾았으면 null이고, 그때는 손으로 세운 벽면을 쓴다. */
 let portalWall: WalkSurface | null = null;
@@ -1501,6 +1664,12 @@ renderer.setAnimationLoop((time, frame) => {
   const fake = frame === undefined && useFakeRoom;
   const shellFrame = frame ?? fakeRoomFrame;
   const shellSpace = fake ? fakeRoomSpace : renderer.xr.getReferenceSpace();
+
+  // 평면 메시를 먼저 갱신한다. 책상을 올릴 가구도, 포털 미리보기가 쏘는
+  // 레이도 이 메시를 읽는다 — 뒤에 두면 늘 한 프레임 묵은 자세를 본다.
+  // 가짜 방도 함께 먹인다. 세션 밖에서 안 돌면 '평면' 버튼이 무엇을 켜고
+  // 끄는지 데스크톱에서 볼 수가 없다.
+  if (shellSpace !== null) updatePlanes(shellFrame, shellSpace);
   if (shellSpace !== null) {
     const newShells = roomShell.sync(shellFrame, shellSpace, viewerPosition);
     // 평면이 늘었다. 포털이 걸린 벽이 이제야 들어왔을 수 있다.
@@ -1661,10 +1830,6 @@ renderer.setAnimationLoop((time, frame) => {
 
   // 자세가 다 정해진 뒤에 행렬을 모은다. render보다 먼저여야 한다.
   roachBatch.sync();
-
-  // 평면 오버레이도 가짜 방을 먹인다. 세션 밖에서 안 돌면 '평면' 버튼이
-  // 무엇을 켜고 끄는지 데스크톱에서 볼 수가 없다.
-  if (shellSpace !== null) updatePlanes(shellFrame, shellSpace);
 
   if (frame !== undefined) {
     const referenceSpace = renderer.xr.getReferenceSpace();

@@ -318,7 +318,7 @@ function edgeSpecFor(
 }
 
 /** 폴리곤을 감싸는 사각형. 평면의 로컬 XZ 기준이다. */
-function boundingRect(plane: XRPlane): {
+export function boundingRect(plane: XRPlane): {
   centerX: number;
   centerZ: number;
   halfX: number;

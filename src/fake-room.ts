@@ -148,7 +148,10 @@ addPlane(
 );
 
 // 걸러져야 하는 것들도 섞어 둔다. 라벨로 거르는 코드가 실제로 돌아야 한다.
-addPlane('table', new THREE.Vector3(0, 0.72, 0), UP, 0.62, 0.36);
+// 기본 치수(1.24 x 0.72, 높이 0.72)와 일부러 다르게, 자리도 방 한가운데에서
+// 비켜 둔다. 같게 두면 책상을 감지된 가구에 맞추는 코드가 아무 일도 안 한
+// 채로 통과한다.
+addPlane('table', new THREE.Vector3(0.5, 0.6, 0.5), UP, 0.75, 0.45);
 addPlane('door', new THREE.Vector3(0.9, 1.0, BACK_Z), new THREE.Vector3(0, 0, 1), 0.45, 1.0);
 // 너무 좁아서 걸을 가치가 없는 조각.
 addPlane('wall', new THREE.Vector3(-1.2, 0.3, 1.0), DOWN, 0.15, 0.15);

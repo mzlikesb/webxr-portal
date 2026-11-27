@@ -39,6 +39,24 @@ function log(line: string): void {
   statusElement.textContent += line + '\n';
 }
 
+/**
+ * 세션 안에서 터진 예외를 나중에 읽을 수 있게 남긴다.
+ *
+ * 렌더 루프에서 예외가 나면 그 프레임의 renderer.render까지 못 간다. AR에서는
+ * 그게 '패스스루만 보이고 아무것도 안 그려짐'이고, 매 프레임 반복되니 영영
+ * 그렇다. 그런데 세션 안에서는 콘솔도 DOM도 볼 수가 없다 — USB로 붙지 않는 한
+ * 무엇이 터졌는지 알 길이 없다. 세션에서 나온 뒤 읽히도록 DOM에 적어 둔다.
+ *
+ * 몇 개만 적는다. 매 프레임 터지면 쌓이는 문자열이 그 자체로 짐이 된다.
+ */
+let errorsLogged = 0;
+window.addEventListener('error', (event) => {
+  if (errorsLogged >= 3) return;
+  errorsLogged += 1;
+  const where = `${event.filename ?? '?'}:${event.lineno ?? 0}`;
+  statusElement.textContent += `[터짐] ${event.message} @ ${where}\n`;
+});
+
 // ---------------------------------------------------------------------------
 // 2) 렌더러
 // ---------------------------------------------------------------------------
@@ -1303,6 +1321,9 @@ scene.add(debugPanel.group);
  */
 let useFakeRoom = false;
 
+/** 패널이 한 번이라도 터졌는지. 그 뒤로는 손대지 않는다. */
+let panelFailed = false;
+
 /** 화면 갱신율. 매 프레임 출렁여서 천천히 따라가게 둔다. */
 let fps = 0;
 
@@ -1533,14 +1554,25 @@ renderer.setAnimationLoop((time, frame) => {
   // 글자는 패널이 보일 때만 만든다. 늘 만들면 문자열과 배열이 매 프레임
   // 버려지고, VR에서는 그 쓰레기가 모였다 터질 때 프레임이 튄다. 보이기
   // 시작한 첫 프레임만 직전 내용을 쓰는데, 그건 눈에 안 보인다.
-  if (debugPanel.group.visible) {
-    debugPanel.setLines([
-      `${fps.toFixed(0)} fps · 평면 ${planeMeshes.size}개`,
-      `껍데기 ${roomShell.surfaces.length}면 · 모서리 ${roomShell.edgeCount}개`,
-      ...planeSummary(),
-    ]);
+  // 패널은 renderer.render보다 앞에 있다. 여기서 터지면 그 프레임이 통째로
+  // 안 그려지고, 매 프레임 터지면 AR에서는 패스스루만 남는다. 들여다보는
+  // 도구가 작품을 지울 수 있으면 안 된다 — 터지면 패널만 끈다.
+  if (!panelFailed) {
+    try {
+      if (debugPanel.group.visible) {
+        debugPanel.setLines([
+          `${fps.toFixed(0)} fps · 평면 ${planeMeshes.size}개`,
+          `껍데기 ${roomShell.surfaces.length}면 · 모서리 ${roomShell.edgeCount}개`,
+          ...planeSummary(),
+        ]);
+      }
+      debugPanel.update(panelHands, viewerPosition);
+    } catch (error) {
+      panelFailed = true;
+      debugPanel.group.visible = false;
+      log(`디버그 패널을 껐다: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
-  debugPanel.update(panelHands, viewerPosition);
 
   const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);
 

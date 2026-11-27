@@ -302,11 +302,18 @@ function reportPlanes(detectedPlanes: XRPlaneSet): void {
 }
 
 // ---------------------------------------------------------------------------
-// 5) 포털 자리 잡기
+// 5) 파이프 자리 잡기
 //
-//    시선 레이를 쏴서 ④의 벽 메시와 교차시키고, 거기에 포털 미리보기를 붙여
-//    둔다. 벽이 안 잡히면 눈앞 1.5m에 세운다(평면 감지가 아예 안 되는 기기의
-//    대체 경로도 겸한다). 트리거를 당기면 그 자리에 확정된다.
+//    감지된 면(벽·바닥·천장) 중 하나를 골라, 그 면 위의 아무 자리에 파이프를
+//    뚫는다. 사람은 고르지 않는다.
+//
+//    전에는 오른손으로 벽을 가리켜 놓았다. 그건 '내가 여기 놓았다'는 그림이라
+//    이야기와 어긋났다 — 이 구멍은 원래 집에 있던 것이어야 한다. 가리키는
+//    조준선, 레이캐스트, 확정 전 미리보기 원판이 그래서 통째로 빠졌다.
+//
+//    면 하나에 올려놓는 방식이라 벽·바닥·천장이 같은 코드로 풀린다. 방향을
+//    타는 값은 딱 하나다 — 아래턱(바퀴가 딛고 나오는 쪽)이 구멍의 어디냐.
+//    벽에서는 아래, 바닥·천장에서는 아무 쪽이다.
 // ---------------------------------------------------------------------------
 /**
  * 파이프 구경(m).
@@ -319,16 +326,20 @@ function reportPlanes(detectedPlanes: XRPlaneSet): void {
  * 바퀴가 4cm다. 14cm면 한 마리가 넉넉히 지나고, 여러 마리면 줄을 선다.
  */
 const PIPE_BORE = 0.14;
-/** 벽을 못 찾았을 때 포털을 띄울 거리. */
-const PORTAL_FALLBACK_DISTANCE = 1.5;
+/** 감지된 면이 없을 때 눈앞 허공에 세울 거리(m). */
+const PIPE_FALLBACK_DISTANCE = 1.5;
+/**
+ * 평면이 들어오기를 이만큼 기다린다(ms). 그래도 없으면 허공에 세운다.
+ *
+ * 평면은 세션이 시작된 뒤 몇 프레임 지나서야 들어온다. 기다리지 않으면
+ * 스캔한 방에서도 늘 허공 경로로 떨어진다.
+ */
+const PIPE_WAIT_FOR_PLANES = 4000;
+/** 구멍 테두리를 면의 활동 사각형 끝에서 이만큼 안으로 당긴다(m). */
+const PIPE_EDGE_MARGIN = 0.1;
 
-const portalSurfaceMaterial = new THREE.MeshBasicMaterial({
-  color: 0x000000,
-  transparent: true,
-  opacity: 0.25,
-});
 const portalEdgeMaterial = new THREE.LineBasicMaterial({
-  color: 0x66ccff,
+  color: 0xffcc33,
   transparent: true,
 });
 
@@ -336,89 +347,46 @@ const portal = new THREE.Group();
 scene.add(portal);
 
 // CircleGeometry는 X-Y에 누워 +Z를 향한다. orientPortal이 이 그룹의 로컬 +Z를
-// 벽의 법선에 맞추므로, 지오메트리를 따로 돌릴 필요가 없다.
+// 면의 법선에 맞추므로, 지오메트리를 따로 돌릴 필요가 없다.
 //
-// 미리보기·테두리·스텐실 마스크가 전부 이 하나를 쓴다. EdgesGeometry는 면이
-// 같은 평면이면 안쪽 변을 버리므로, 원판에서 바깥 테두리만 남는다 — 파이프
-// 입구의 링이 공짜로 나온다.
+// 테두리와 스텐실 마스크가 이 하나를 나눠 쓴다. EdgesGeometry는 면이 같은
+// 평면이면 안쪽 변을 버리므로, 원판에서 바깥 테두리만 남는다 — 파이프 입구의
+// 링이 공짜로 나온다.
 const portalShape = new THREE.CircleGeometry(PIPE_BORE / 2, 32);
 
-/** 확정 전에 보여 주는 반투명 원판. 확정되면 숨기고 진짜 구멍으로 바꾼다. */
-const portalPreview = new THREE.Mesh(portalShape, portalSurfaceMaterial);
-portal.add(portalPreview);
-
-/** 테두리. 구멍이 뚫린 뒤에도 남아서 파이프 입구의 링이 된다. */
+/** 파이프 입구의 링. */
 portal.add(new THREE.LineSegments(new THREE.EdgesGeometry(portalShape), portalEdgeMaterial));
 
-const raycaster = new THREE.Raycaster();
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const WORLD_DOWN = new THREE.Vector3(0, -1, 0);
 
 // 매 프레임 new Vector3를 만들지 않으려고 미리 잡아 둔다. three.js 코드에서
 // 흔한 관습이다.
-const pointerOrigin = new THREE.Vector3();
-const pointerDirection = new THREE.Vector3();
-const pointerQuaternion = new THREE.Quaternion();
-const pointerMatrix = new THREE.Matrix4();
 const portalPoint = new THREE.Vector3();
 const portalNormal = new THREE.Vector3();
+/**
+ * 파이프의 로컬 +Y(월드). 아래턱의 반대쪽을 가리킨다.
+ *
+ * 벽에 걸린 파이프에서는 이게 월드 위다. 바닥이나 천장에 걸리면 면 안에
+ * 눕는다 — 그래도 '아래턱 반대쪽'이라는 뜻은 그대로여서, 이걸 기준으로 쓰는
+ * 코드는 세 경우를 가리지 않는다.
+ */
+const portalUp = new THREE.Vector3();
+/** 구멍에서 멀어지는 수평 방향. 지어낸 책상을 어디에 둘지 정할 때만 쓴다. */
+const awayDir = new THREE.Vector3();
 const basisRight = new THREE.Vector3();
 const basisUp = new THREE.Vector3();
 const basisMatrix = new THREE.Matrix4();
 
 let portalPlaced = false;
-
-/** semanticLabel이 있으면 그걸 믿는다. 문과 창문도 vertical이라서,
- *  라벨 없이 orientation만 보면 포털이 문짝에 걸릴 수 있다. */
-function isWall(plane: XRPlane): boolean {
-  if (plane.semanticLabel !== undefined) return plane.semanticLabel === 'wall';
-  return plane.orientation === 'vertical';
-}
-
-/** 오른손이 가리키는 레이를 읽는다. 못 읽으면 false.
+/**
+ * 이 시각이 지나도 감지된 면이 없으면 허공에 세운다. 음수면 아직 재기 전.
  *
- *  three.js에 renderer.xr.getController(i)가 있지만 i는 입력 소스의 순서일 뿐
- *  손이 아니다. 오른손을 '확실히' 집으려면 handedness를 직접 봐야 한다.
- *  targetRaySpace는 컨트롤러든 맨손이든 똑같이 있다(맨손이면 핀치 레이).
- *  평면을 읽을 때와 같은 frame.getPose 패턴이라 새로 배울 게 없다. */
-function readRightPointer(frame: XRFrame, referenceSpace: XRReferenceSpace): boolean {
-  for (const inputSource of frame.session.inputSources) {
-    if (inputSource.handedness !== 'right') continue;
-
-    const pose = frame.getPose(inputSource.targetRaySpace, referenceSpace);
-    if (pose === undefined || pose === null) continue;
-
-    pointerMatrix.fromArray(pose.transform.matrix);
-    pointerOrigin.setFromMatrixPosition(pointerMatrix);
-    pointerQuaternion.setFromRotationMatrix(pointerMatrix);
-    // 타깃 레이는 그 좌표계의 -Z를 향한다. 카메라와 같은 규약이다.
-    pointerDirection.set(0, 0, -1).applyQuaternion(pointerQuaternion);
-
-    return true;
-  }
-
-  return false;
-}
-
-/** 오른손이 없을 때(컨트롤러가 잠들었거나 핸드 트래킹이 꺼졌을 때)의 대비책. */
-function readGaze(): void {
-  // 중요: XR 세션 중에 머리 포즈를 들고 있는 건 위에서 만든 camera가 아니라
-  // renderer.xr.getCamera()가 돌려주는 ArrayCamera다. camera는 three.js가
-  // 내부 기준으로만 쓰고, 실제로 그려지는 건 눈마다 하나씩인 하위 카메라다.
-  const xrCamera = renderer.xr.getCamera();
-  xrCamera.getWorldPosition(pointerOrigin);
-  xrCamera.getWorldDirection(pointerDirection); // 월드 기준 -Z
-}
-
-// 조준선. 안 보이면 벽의 어디를 맞추는지 알 수 없다.
-const pointerRay = new THREE.Line(
-  new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(0, 0, 0),
-    new THREE.Vector3(0, 0, -1),
-  ]),
-  new THREE.LineBasicMaterial({ color: 0x66ccff }),
-);
-pointerRay.visible = false;
-scene.add(pointerRay);
+ * setAnimationLoop이 주는 시각으로 잰다. performance.now()와 같은 시계일 것
+ * 같지만, XR 세션의 프레임 시각이 어느 원점을 쓰는지는 보장하지 않는다 —
+ * 들어오는 숫자로만 재면 그걸 알 필요가 없다.
+ */
+let placeDeadline = -1;
 
 /**
  * 포털 사각형을 벽에서 이만큼 띄운다(m). 벽과 완전히 같은 평면에 두면
@@ -439,87 +407,197 @@ const PORTAL_WALL_GAP = 0.01;
  */
 const PORTAL_CLIP_DEPTH = 0.03;
 
-/** 벽에 '똑바로' 거는 자세를 만든다. 벽 평면의 로컬 축을 그대로 쓰지 않는
- *  이유는, 로컬 X/Z 중 어느 쪽이 세로인지 스펙이 보장하지 않기 때문이다.
- *  월드 업과 법선으로 직접 기저를 만들면 그 가정이 필요 없다. */
-function orientPortal(point: THREE.Vector3, normal: THREE.Vector3): void {
-  basisRight.crossVectors(WORLD_UP, normal).normalize();
-  basisUp.crossVectors(normal, basisRight).normalize();
+/**
+ * 파이프를 면에 '똑바로' 거는 자세를 만든다.
+ *
+ * 면 평면의 로컬 축을 그대로 쓰지 않는다. 로컬 X/Z 중 어느 쪽이 세로인지
+ * 스펙이 보장하지 않고, 바닥·천장에서는 세로라는 것 자체가 없다.
+ *
+ * 전에는 월드 업과 법선으로 기저를 만들었다. 벽에서만 되는 요령이다 —
+ * 바닥에 걸면 법선이 월드 업이라 외적이 0이 되고 자세가 NaN이 된다.
+ * 이제는 법선과 아래턱 방향, 둘 다 면 안의 정보로만 만든다.
+ *
+ * @param sillDir 구멍 가운데에서 아래턱으로 가는 방향(월드). 면 안에 눕는다.
+ */
+function orientPortal(
+  point: THREE.Vector3,
+  normal: THREE.Vector3,
+  sillDir: THREE.Vector3,
+): void {
+  // 로컬 +Y = 아래턱의 반대쪽. 법선 성분을 빼서 면 안에 눕힌다.
+  basisUp
+    .copy(sillDir)
+    .addScaledVector(normal, -sillDir.dot(normal))
+    .negate()
+    .normalize();
+  // 오른손 좌표계라 X = Y × Z다.
+  basisRight.crossVectors(basisUp, normal).normalize();
   basisMatrix.makeBasis(basisRight, basisUp, normal);
 
   portal.quaternion.setFromRotationMatrix(basisMatrix);
-  // 벽과 완전히 같은 평면에 두면 z-fighting이 난다. 1cm 띄운다.
+  // 면과 완전히 같은 평면에 두면 z-fighting이 난다. 1cm 띄운다.
   portal.position.copy(point).addScaledVector(normal, PORTAL_WALL_GAP);
 }
 
-/** 확정 전까지 매 프레임 호출. 가리키는 자리로 포털을 옮겨 둔다. */
-function updatePortalPreview(frame: XRFrame, referenceSpace: XRReferenceSpace): void {
-  const hasPointer = readRightPointer(frame, referenceSpace);
-  if (hasPointer === false) readGaze();
+// 자리를 고른 결과. 고르는 것과 놓는 것을 나눠 둬야 '감지된 면'과 '허공'이
+// 같은 놓기 코드를 쓴다.
+const spotPoint = new THREE.Vector3();
+const spotNormal = new THREE.Vector3();
+const spotSill = new THREE.Vector3();
+const spotQuaternion = new THREE.Quaternion();
+const spotInverse = new THREE.Matrix4();
+const sillLocal = new THREE.Vector3();
 
-  // 확정 전까지만 도는 코드라 매 프레임 배열을 만들어도 괜찮다.
-  const wallMeshes: THREE.Mesh[] = [];
-  for (const [plane, mesh] of planeMeshes) {
-    if (isWall(plane)) wallMeshes.push(mesh);
+/**
+ * 아래턱이 구멍의 어느 쪽인지 정한다(면 안에 눕는 단위 벡터, 월드).
+ *
+ * 벽이면 '아래'다. 나와서 벽을 타고 내려가는 그림이 그래야 나온다. 바닥과
+ * 천장에는 아래가 없으니 아무 방향이나 고른다 — 관 속에서는 그 방향 반대쪽이
+ * 곧 바퀴가 딛는 관 벽이 되므로, 어느 쪽이어도 그림이 성립한다.
+ *
+ * 면의 로컬에서 고른다. 로컬 XZ는 이미 면 안이라, 수평 면에서 '면 안의 아무
+ * 방향'이 각도 하나로 끝난다.
+ */
+function pickSillDir(node: THREE.Object3D, out: THREE.Vector3): void {
+  spotInverse.copy(node.matrixWorld).invert();
+  sillLocal.copy(WORLD_DOWN).transformDirection(spotInverse);
+  sillLocal.y = 0; // 법선 성분을 버린다
+
+  // transformDirection이 단위로 만들어 주므로, 여기서 0.3보다 짧으면 면이
+  // 수평에서 17° 안쪽이라는 뜻이다 — 바닥이나 천장이다.
+  if (sillLocal.lengthSq() < 0.09) {
+    const angle = Math.random() * Math.PI * 2;
+    sillLocal.set(Math.cos(angle), 0, Math.sin(angle));
   }
 
-  raycaster.set(pointerOrigin, pointerDirection);
-  const hit = raycaster.intersectObjects(wallMeshes, false)[0];
-
-  if (hit !== undefined) {
-    // 벽 메시의 로컬 +Y가 평면의 법선이다(④에서 지오메트리를 X-Z로 눕혔으므로).
-    portalNormal.set(0, 1, 0).applyQuaternion(hit.object.quaternion).normalize();
-    // 법선이 벽 안쪽을 향할 수도 있다. 보는 사람 쪽으로 뒤집는다.
-    if (portalNormal.dot(pointerDirection) > 0) portalNormal.negate();
-    portalPoint.copy(hit.point);
-  } else {
-    // 벽이 없다. 눈앞에 세운다.
-    portalNormal.copy(pointerDirection).negate();
-    portalNormal.y = 0; // 바닥이나 천장을 보고 있었어도 포털은 수직으로 세운다.
-    if (portalNormal.lengthSq() < 0.001) portalNormal.set(0, 0, 1);
-    portalNormal.normalize();
-    portalPoint.copy(pointerOrigin).addScaledVector(pointerDirection, PORTAL_FALLBACK_DISTANCE);
-  }
-
-  orientPortal(portalPoint, portalNormal);
-
-  // 조준선을 손에서 포털까지 늘인다. 선은 로컬 -Z 방향 1m짜리라,
-  // 거리만큼 z로 스케일하면 된다.
-  pointerRay.visible = hasPointer;
-  if (hasPointer) {
-    pointerRay.position.copy(pointerOrigin);
-    pointerRay.quaternion.copy(pointerQuaternion);
-    pointerRay.scale.setScalar(pointerOrigin.distanceTo(portalPoint));
-  }
+  out.copy(sillLocal).transformDirection(node.matrixWorld);
 }
 
-/** 트리거를 당겼을 때. 지금 미리보기가 있는 자리에 그대로 확정한다. */
-function placePortal(): void {
-  if (portalPlaced) return;
+/** 파이프가 어디에 뚫렸는지. 로그에만 쓴다. */
+let pipeHostLabel = '';
 
+/**
+ * 감지된 면 하나를 골라 그 위의 아무 자리를 집는다. 쓸 만한 면이 없으면 false.
+ *
+ * 활동 사각형에서 고른다(평면의 바운딩 박스가 아니라). 구멍이 바퀴가 못 가는
+ * 데 뚫리면 나올 길이 없기 때문이다.
+ */
+function pickPipeSpot(): boolean {
+  const margin = PIPE_BORE / 2 + PIPE_EDGE_MARGIN;
+  const roomy = roomShell.surfaces.filter(
+    (shell) =>
+      shell.surface.boundHalfX > margin && shell.surface.boundHalfZ > margin,
+  );
+  if (roomy.length === 0) return false;
+
+  const shell = roomy[Math.floor(Math.random() * roomy.length)];
+  const node = shell.surface.node;
+  node.updateMatrixWorld();
+
+  spotPoint.set(
+    (Math.random() * 2 - 1) * (shell.surface.boundHalfX - margin),
+    0,
+    shell.surface.boundCenterZ +
+      (Math.random() * 2 - 1) * (shell.surface.boundHalfZ - margin),
+  );
+  node.localToWorld(spotPoint);
+
+  // 면의 로컬 +Y가 법선이다. 껍데기가 이미 방 안쪽을 보도록 뒤집어 놨다.
+  node.getWorldQuaternion(spotQuaternion);
+  spotNormal.set(0, 1, 0).applyQuaternion(spotQuaternion).normalize();
+  pickSillDir(node, spotSill);
+
+  pipeHostLabel = shell.label;
+  return true;
+}
+
+/** 고른 자리에 구멍을 뚫는다. */
+function placePipeAt(
+  point: THREE.Vector3,
+  normal: THREE.Vector3,
+  sillDir: THREE.Vector3,
+): void {
   portalPlaced = true;
   // 면들이 통째로 옮겨 간다. 방과 만나는 자리를 다시 구해야 한다.
   needsRelink = true;
-  pointerRay.visible = false;
 
-  // 미리보기를 끄고 진짜 포털을 켠다.
-  portalPreview.visible = false;
+  portalPoint.copy(point);
+  orientPortal(point, normal, sillDir);
+
   portalMask.visible = true;
   portalWorld.visible = true;
-  portalEdgeMaterial.color.setHex(0xffcc33);
 
-  // 평면 시각화는 디버그용이었다. 켜 둔 채로 두면 벽 오버레이가 포털 앞을
+  // 평면 시각화는 디버그용이었다. 켜 둔 채로 두면 벽 오버레이가 구멍 앞을
   // 가린다. 다시 보고 싶으면 손바닥 패널에서 켠다.
   showPlanes = false;
   applyPlaneVisibility();
 
-  log(`포털 확정: ${portalPoint.x.toFixed(2)}, ${portalPoint.y.toFixed(2)}, ${portalPoint.z.toFixed(2)}`);
+  log(
+    `파이프 ${pipeHostLabel}: ` +
+      `${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}`,
+  );
+}
+
+/**
+ * 아직 파이프가 없으면 뚫는다. 매 프레임 부른다.
+ *
+ * 평면이 들어오기를 잠깐 기다린다. 방을 스캔한 적 없는 기기에서는 영영 안
+ * 오므로, 그때는 눈앞 허공에 벽처럼 세운다 — 손으로 세운 벽면과 방 바닥이
+ * 그 경우를 위해 남아 있다.
+ */
+function tryPlacePipe(viewer: THREE.Object3D, now: number): void {
+  if (portalPlaced) return;
+  if (placeDeadline < 0) placeDeadline = now + PIPE_WAIT_FOR_PLANES;
+
+  if (pickPipeSpot()) {
+    placePipeAt(spotPoint, spotNormal, spotSill);
+    return;
+  }
+  if (now < placeDeadline) return;
+
+  viewer.getWorldPosition(spotPoint);
+  viewer.getWorldDirection(spotNormal); // 월드 기준 -Z
+  spotPoint.addScaledVector(spotNormal, PIPE_FALLBACK_DISTANCE);
+  // 법선은 보는 사람 쪽. 바닥이나 천장을 보고 있었어도 벽처럼 수직으로 세운다.
+  spotNormal.negate();
+  spotNormal.y = 0;
+  if (spotNormal.lengthSq() < 1e-4) spotNormal.set(0, 0, 1);
+  spotNormal.normalize();
+  spotSill.copy(WORLD_DOWN);
+
+  pipeHostLabel = '허공';
+  placePipeAt(spotPoint, spotNormal, spotSill);
+}
+
+/** [미리보기 전용] 자리가 난수라, 뚫린 데로 카메라를 데려간다. */
+function aimPreviewCamera(): void {
+  portalNormal.set(0, 0, 1).applyQuaternion(portal.quaternion);
+  portalUp.set(0, 1, 0).applyQuaternion(portal.quaternion);
+  camera.position
+    .copy(portal.position)
+    .addScaledVector(portalNormal, 0.5)
+    // 입구를 정면으로 꽉 채우면 나온 바퀴가 어디로 가는지 안 보인다.
+    .addScaledVector(portalUp, 0.25);
+  camera.lookAt(portal.position);
+}
+
+/**
+ * 구멍을 다른 자리로 옮긴다. 핀치하면 이게 돈다.
+ *
+ * 자리가 난수라 헤드셋에서 여러 경우를 보려면 세션을 다시 시작하는 수밖에
+ * 없었다. 바퀴도 되돌린다 — 복도가 통째로 옮겨 가므로, 이미 방에 나와 있던
+ * 놈들은 구멍과 상관없는 데 남는다.
+ */
+function repickPipe(): void {
+  resetPortal();
+  resetRoaches();
 }
 
 function resetPortal(): void {
   portalPlaced = false;
+  placeDeadline = -1;
 
-  // 평면 오버레이를 다시 켠다. 벽을 고르는 단계라 이게 유일한 길잡이다.
+  // 평면 오버레이를 다시 켠다. 구멍이 뚫리기 전까지는 이게 유일한 길잡이다.
   //
   // 전에는 평면 메시가 태어날 때 portalPlaced를 보고 자기 visible을 정했다.
   // 손바닥 패널에서 껐다 켤 수 있게 그걸 showPlanes 하나로 모았는데, 여기서
@@ -529,11 +607,8 @@ function resetPortal(): void {
   showPlanes = true;
   applyPlaneVisibility();
 
-  pointerRay.visible = false;
-  portalPreview.visible = true;
   portalMask.visible = false;
   portalWorld.visible = false;
-  portalEdgeMaterial.color.setHex(0x66ccff);
   // 페이드 중에 세션이 끝났을 수 있다. 다음 세션은 멀쩡한 상태로 시작한다.
   for (const entry of portalFadeMaterials) entry.material.opacity = entry.baseOpacity;
 }
@@ -1178,34 +1253,50 @@ function layOutTable(center: THREE.Vector3, facing: THREE.Vector3): void {
 /** 두 면을 포털 자리에 맞춰 세운다. 포털을 옮기면 다시 부른다. */
 function layOutSurfaces(): void {
   portalNormal.set(0, 0, 1).applyQuaternion(portal.quaternion);
+  portalUp.set(0, 1, 0).applyQuaternion(portal.quaternion);
 
-  // 아래턱: 구멍의 바닥 선. 두 면이 여기서 만난다.
-  // 벽과 겹쳐 z-fighting이 나지 않게 법선 쪽으로 1mm 띄운다.
+  // 아래턱: 구멍의 '바닥' 선. 두 면이 여기서 만난다.
+  // 면과 겹쳐 z-fighting이 나지 않게 법선 쪽으로 1mm 띄운다.
   const sill = new THREE.Vector3()
     .copy(portal.position)
-    .addScaledVector(WORLD_UP, -PIPE_BORE / 2)
+    .addScaledVector(portalUp, -PIPE_BORE / 2)
     .addScaledVector(portalNormal, 0.001);
 
-  // 복도 바닥: 수평, 등은 위를 보고, +Z가 구멍 밖을 향한다.
+  // 관 안에서 딛는 면: 등은 아래턱 반대쪽(portalUp)을 보고, +Z가 구멍 밖이다.
+  //
+  // 벽에 걸린 파이프에서는 portalUp이 월드 위라 '관 바닥을 기어 나온다'가
+  // 되고, 바닥이나 천장에 걸리면 관이 수직으로 서서 이 면도 같이 서니
+  // '관 벽을 타고 올라온다/내려온다'가 된다. 한 줄이 셋을 다 한다.
   corridorFloor.node.position.copy(sill);
-  orientSurface(corridorFloor.node, WORLD_UP, portalNormal);
+  orientSurface(corridorFloor.node, portalUp, portalNormal);
 
-  // 벽면: 수직, 등은 방을 보고, +Z가 벽을 타고 아래로 간다.
-  // 직진하던 바퀴가 각도를 바꾸지 않고 그대로 벽을 타도록 하는 배치다.
-  wallFace.node.position.copy(sill);
-  orientSurface(wallFace.node, portalNormal, WORLD_UP.clone().negate());
+  // 손으로 세운 벽면과 방 바닥은 스캔한 적 없는 방을 위한 대비다. 그때 파이프는
+  // 늘 허공에 수직으로 서므로, 아래 계산은 파이프가 수직일 때만 뜻이 있다.
+  //
+  // 바닥이나 천장에 걸린 파이프에서는 법선이 월드 위아래라, '벽을 타고 아래로'
+  // 라는 말이 성립하지 않는다 — orientSurface에 법선과 평행한 힌트를 주게 되고
+  // 자세가 NaN이 된다. 그 경우 이 두 면은 세우지 않는다. 감지된 면에 뚫린
+  // 파이프는 어차피 linkPipeToHost가 이 둘을 빼 버린다.
+  const onWall = Math.abs(portalNormal.y) < 0.5;
 
-  // 방 바닥: 수평, +Z가 벽에서 멀어지는 쪽.
-  // 원점은 벽이 바닥과 만나는 선 위, 아래턱 바로 밑이다. 벽면과 로컬 X를
-  // 공유하므로(둘 다 up × 법선) 모서리를 넘을 때 x가 그대로 보존된다.
-  // local-floor 기준 공간이라 진짜 바닥이 y = 0이다.
-  roomFloor.node.position.set(sill.x, 0, sill.z);
-  roomFloor.node.position.addScaledVector(portalNormal, 0.001);
-  orientSurface(roomFloor.node, WORLD_UP, portalNormal);
+  if (onWall) {
+    // 벽면: 수직, 등은 방을 보고, +Z가 벽을 타고 아래로 간다.
+    // 직진하던 바퀴가 각도를 바꾸지 않고 그대로 벽을 타도록 하는 배치다.
+    wallFace.node.position.copy(sill);
+    orientSurface(wallFace.node, portalNormal, WORLD_DOWN);
+
+    // 방 바닥: 수평, +Z가 벽에서 멀어지는 쪽.
+    // 원점은 벽이 바닥과 만나는 선 위, 아래턱 바로 밑이다. 벽면과 로컬 X를
+    // 공유하므로(둘 다 up × 법선) 모서리를 넘을 때 x가 그대로 보존된다.
+    // local-floor 기준 공간이라 진짜 바닥이 y = 0이다.
+    roomFloor.node.position.set(sill.x, 0, sill.z);
+    roomFloor.node.position.addScaledVector(portalNormal, 0.001);
+    orientSurface(roomFloor.node, WORLD_UP, portalNormal);
+  }
 
   // 아래턱에서 바닥까지의 거리. 벽면의 로컬 +Z가 아래를 향하므로 그대로 쓴다.
-  // 포털을 아주 낮게 걸면 내려갈 벽이 없다. 그때는 모서리를 닫는다.
-  const dropHeight = sill.y;
+  // 파이프를 아주 낮게 걸면 내려갈 벽이 없다. 그때는 모서리를 닫는다.
+  const dropHeight = onWall ? sill.y : 0;
   wallToFloor.at = dropHeight;
   wallToFloor.halfWidth = dropHeight > 0.05 ? Infinity : 0;
   // 벽면은 포털보다 양옆으로 조금 더 넓다. 바퀴가 구멍 옆 벽으로도 번진다.
@@ -1220,15 +1311,21 @@ function layOutSurfaces(): void {
     surface.node.updateMatrixWorld();
   }
 
-  // 책상은 벽에서 조금 떨어진 자리에 놓는다. 방에서 감지된 'table' 평면에
-  // 맞추는 건 다음 단계다 — 지금은 포털 기준으로 둔다.
-  // 감지된 가구가 있으면 거기에 세운다. 없을 때만 포털 앞에 지어낸다 —
+  // 감지된 가구가 있으면 거기에 세운다. 없을 때만 구멍 앞에 지어낸다 —
   // 스캔한 적 없는 방에서도 올라갈 것이 하나는 있어야 한다.
   if (!layOutTableOnFurniture()) {
+    // 책상을 밀어낼 방향. 벽이면 법선이 곧 '방 쪽'이지만, 바닥이나 천장에
+    // 뚫린 파이프에서는 법선이 위아래라 책상이 허공에 뜬다. 그때는 면 안에
+    // 누운 축(portalUp)을 쓴다.
+    awayDir.copy(onWall ? portalNormal : portalUp);
+    awayDir.y = 0;
+    if (awayDir.lengthSq() < 1e-4) awayDir.set(0, 0, 1);
+    awayDir.normalize();
+
     tablePoint
       .set(sill.x, table.height, sill.z)
-      .addScaledVector(portalNormal, table.halfZ + 0.45);
-    layOutTable(tablePoint, portalNormal);
+      .addScaledVector(awayDir, table.halfZ + 0.45);
+    layOutTable(tablePoint, awayDir);
   }
 
   // 방과 다시 잇는 건 여기서 하지 않는다. 이 함수는 포털을 놓은 뒤 매 프레임
@@ -1339,18 +1436,21 @@ function rescueFrom(gone: ShellSurface[]): void {
   }
 }
 
-/** 포털이 걸린 진짜 벽. 못 찾았으면 null이고, 그때는 손으로 세운 벽면을 쓴다. */
-let portalWall: WalkSurface | null = null;
-/** 복도 ↔ 포털 벽 모서리. 포털을 다시 놓으면 걷어내고 새로 만든다. */
+/**
+ * 파이프가 뚫린 진짜 면. 못 찾았으면 null이고, 그때는 손으로 세운 벽면을 쓴다.
+ *
+ * '벽'이 아니라 '면'이다 — 바닥이나 천장일 수도 있다.
+ */
+let pipeHost: WalkSurface | null = null;
+/** 복도 ↔ 그 면의 모서리. 파이프를 다시 뚫으면 걷어내고 새로 만든다. */
 let portalLink: { surface: WalkSurface; edge: SurfaceEdge }[] = [];
 
 const wallLocal = new THREE.Vector3();
-const portalUp = new THREE.Vector3();
 
-/** 포털이 어느 감지된 벽에 걸려 있는지. 아니면 null. */
-function findPortalWall(): ShellSurface | null {
+/** 파이프가 어느 감지된 면에 뚫려 있는지. 아니면 null. */
+function findPipeHost(): ShellSurface | null {
   let best: ShellSurface | null = null;
-  let bestGap = 0.08; // 벽에서 이보다 멀면 그 벽에 걸린 게 아니다(m)
+  let bestGap = 0.08; // 면에서 이보다 멀면 그 면에 뚫린 게 아니다(m)
 
   for (const shell of roomShell.surfaces) {
     shell.surface.node.updateMatrixWorld();
@@ -1359,7 +1459,7 @@ function findPortalWall(): ShellSurface | null {
 
     const gap = Math.abs(wallLocal.y);
     if (gap >= bestGap) continue;
-    // 평면에는 끝이 있다. 포털이 그 사각형 밖이면 다른 벽이다.
+    // 평면에는 끝이 있다. 구멍이 그 사각형 밖이면 다른 면이다.
     if (Math.abs(wallLocal.x) > shell.width / 2) continue;
     if (Math.abs(wallLocal.z) > shell.depth / 2) continue;
 
@@ -1370,35 +1470,45 @@ function findPortalWall(): ShellSurface | null {
 }
 
 /**
- * 복도를 포털이 걸린 진짜 벽에 잇고, 손으로 세운 벽면·방 바닥을 뺀다.
+ * 복도를 파이프가 뚫린 진짜 면에 잇고, 손으로 세운 벽면·방 바닥을 뺀다.
  *
- * 벽면과 방 바닥은 같은 자리를 두 번 적은 것이다 — 손으로 세운 벽면은 포털이
- * 걸린 진짜 벽과 겹치고, 방 바닥은 진짜 바닥과 겹친다. 스캔한 적이 없는 방을
+ * 벽면과 방 바닥은 같은 자리를 두 번 적은 것이다 — 손으로 세운 벽면은 파이프가
+ * 뚫린 진짜 면과 겹치고, 방 바닥은 진짜 바닥과 겹친다. 스캔한 적이 없는 방을
  * 위한 대비일 뿐이라, 진짜가 들어오면 물러난다. 남겨 두면 복도에서 나가는
- * 모서리가 둘이 되어 어느 벽으로 나가는지가 목록 순서에 달린다.
+ * 모서리가 둘이 되어 어느 면으로 나가는지가 목록 순서에 달린다.
+ *
+ * 모서리의 법선은 파이프의 로컬 +Y를 그 면에 눕힌 것이다 — 아래턱을 그 쪽으로
+ * 넘어서면 구멍 안으로 들어가는 것이다. 벽이면 '위로 넘어서면'이 되고, 바닥에
+ * 뚫렸으면 '아래턱 반대쪽으로 넘어서면'이 된다. 같은 한 줄이다.
  */
-function linkPortalToWall(): void {
-  const shell = findPortalWall();
+function linkPipeToHost(): void {
+  const shell = findPipeHost();
   if (shell === null) return;
 
-  // 전에 이어 둔 게 있으면 걷어낸다. 포털을 다시 놓으면 자리가 바뀐다.
+  // 전에 이어 둔 게 있으면 걷어낸다. 파이프를 다시 뚫으면 자리가 바뀐다.
   for (const { surface, edge } of portalLink) {
     const at = surface.edges.indexOf(edge);
     if (at >= 0) surface.edges.splice(at, 1);
   }
   portalLink = [];
 
-  const changed = portalWall !== shell.surface;
-  portalWall = shell.surface;
-  portalWall.node.updateMatrixWorld();
+  const changed = pipeHost !== shell.surface;
+  // 전에 쓰던 면에 심어 둔 '아래로'를 걷는다. 그대로 두면 파이프가 옮겨 간
+  // 뒤에도 그 면의 바퀴들이 계속 한쪽으로만 내려간다.
+  if (changed && pipeHost !== null) {
+    pipeHost.drift = null;
+    pipeHost.hugEdges = true;
+  }
+  pipeHost = shell.surface;
+  pipeHost.node.updateMatrixWorld();
 
-  // 아래턱 위의 한 점과, 거기서 구멍 쪽으로 가는 방향을 벽의 로컬 2D로 옮긴다.
+  // 아래턱 위의 한 점과, 거기서 구멍 쪽으로 가는 방향을 면의 로컬 2D로 옮긴다.
   wallLocal.copy(corridorFloor.node.position);
-  portalWall.node.worldToLocal(wallLocal);
+  pipeHost.node.worldToLocal(wallLocal);
   portalUp
     .set(0, 1, 0)
     .applyQuaternion(portal.quaternion)
-    .transformDirection(wallInverse.copy(portalWall.node.matrixWorld).invert());
+    .transformDirection(wallInverse.copy(pipeHost.node.matrixWorld).invert());
 
   const length = Math.hypot(portalUp.x, portalUp.z);
   if (length < 1e-6) return;
@@ -1408,7 +1518,7 @@ function linkPortalToWall(): void {
   const [corridorEdge, wallEdge] = linkSurfaces(
     corridorFloor,
     { nx: 0, nz: 1, at: 0 },
-    portalWall,
+    pipeHost,
     {
       nx,
       nz,
@@ -1416,15 +1526,15 @@ function linkPortalToWall(): void {
       alongCenter: -wallLocal.x * nz + wallLocal.z * nx,
       // 구멍 폭만큼만 열려 있다. 그 밖은 막힌 벽이다.
       halfWidth: PIPE_BORE / 2,
-      // 아래턱을 위로 넘어서는 것 = 구멍 안으로 들어가는 것이다. 구멍 높이
-      // 만큼만 본다 — 띠가 없으면 구멍보다 한참 위를 기어가는 바퀴까지
-      // '넘어섰다'로 잡혀 허공에서 복도로 빨려 들어간다.
+      // 아래턱을 넘어서는 것 = 구멍 안으로 들어가는 것이다. 구경만큼만 본다 —
+      // 띠가 없으면 구멍보다 한참 떨어진 데를 기어가는 바퀴까지 '넘어섰다'로
+      // 잡혀 허공에서 복도로 빨려 들어간다.
       band: PIPE_BORE,
     },
   );
   portalLink = [
     { surface: corridorFloor, edge: corridorEdge },
-    { surface: portalWall, edge: wallEdge },
+    { surface: pipeHost, edge: wallEdge },
   ];
 
   const retired = new Set<WalkSurface>([wallFace, roomFloor]);
@@ -1440,14 +1550,19 @@ const wallDown = new THREE.Vector3();
 const wallInverse = new THREE.Matrix4();
 
 /**
- * 포털이 걸린 벽에 '아래로'라는 목적을 준다.
+ * 파이프가 뚫린 면이 벽이면 '아래로'라는 목적을 준다.
  *
  * 손으로 세운 벽면은 로컬 +Z가 아래를 향하도록 세워 두고 drift = 0을 줬다.
  * 감지된 벽은 자세를 런타임이 정하므로 그 요령이 통하지 않는다. 월드의 아래
  * 방향을 면 안으로 눕혀서 heading으로 적는다.
  *
- * 이게 없으면 바퀴가 포털에서 나와 3m × 2.4m 벽 위를 목적 없이 떠돈다.
+ * 이게 없으면 바퀴가 구멍에서 나와 3m × 2.4m 벽 위를 목적 없이 떠돈다.
  * 실제로 그랬다 — 여덟 마리가 다 나왔는데 75초 동안 아무도 바닥에 못 닿았다.
+ *
+ * 바닥과 천장에는 '아래'가 없다. 월드 아래를 눕히면 거의 0이 되어 방향이
+ * 수치 오차로 결정된다 — 바퀴 여덟 마리가 난수 방향으로 줄지어 간다. 그런
+ * 면은 껍데기 기본값(목적 없이 가장자리 살피기) 그대로 둔다. 그게 나온 뒤의
+ * 행동으로도 맞다.
  *
  * 매 프레임 다시 구한다. 면이 하나 더 들어오면 법선 판정이 뒤집힐 수 있고,
  * 뒤집히면 로컬 '아래'도 함께 돌아간다.
@@ -1455,12 +1570,19 @@ const wallInverse = new THREE.Matrix4();
  * 올라온 바퀴까지 다시 내려보내지는 않는다. 모서리를 넘을 때, 들어온 방향이
  * 그 면의 drift와 반대면 그 바퀴의 목적지는 지워지기 때문이다.
  */
-function aimPortalWallDown(): void {
-  if (portalWall === null) return;
-  portalWall.node.updateMatrixWorld();
-  wallInverse.copy(portalWall.node.matrixWorld).invert();
+function aimHostDown(): void {
+  if (pipeHost === null) return;
+  pipeHost.node.updateMatrixWorld();
+  wallInverse.copy(pipeHost.node.matrixWorld).invert();
   wallDown.set(0, -1, 0).transformDirection(wallInverse);
-  portalWall.drift = Math.atan2(wallDown.x, wallDown.z);
+
+  // 면 안에 누운 길이가 0.3보다 짧으면 수평에서 17° 안쪽이다.
+  if (wallDown.x * wallDown.x + wallDown.z * wallDown.z < 0.09) {
+    pipeHost.drift = null;
+    pipeHost.hugEdges = true;
+    return;
+  }
+  pipeHost.drift = Math.atan2(wallDown.x, wallDown.z);
 }
 
 
@@ -1534,18 +1656,18 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
   roachBatch.register(crossing.inside);
 }
 
-// [미리보기 전용] 가짜 포털. 헤드셋 없이는 이 그림을 아예 볼 수 없다.
-// 세션에 들어가면 resetPortal이 지우고 사람이 직접 놓는다.
-portal.position.set(0, 1.2, -1.3);
-portal.quaternion.identity(); // 로컬 +Z가 법선이라 그대로 카메라를 향한다
-portalPoint.copy(portal.position);
-placePortal();
+// 파이프는 여기서 놓지 않는다. 전에는 데스크톱 미리보기용으로 눈앞 1.3m에
+// 하나 박아 두고 placePortal()을 바로 불렀다. 자리를 사람이 고르던 때라
+// 미리보기에서 구멍을 보려면 그 수밖에 없었다.
+//
+// 이제는 자리를 코드가 고른다. 그러면 미리보기도 그 고르는 코드를 통과해야
+// 한다 — 박아 두면 가짜 방 평면 위에 뚫는 길이 데스크톱에서 한 번도 안 돌고,
+// 벽·바닥·천장 중 뭘 집는지, 아래턱을 어디로 두는지 볼 수가 없다.
+// 렌더 루프의 tryPlacePipe가 가짜 방 평면이 들어온 첫 프레임에 뚫는다.
 
-layOutSurfaces();
-
-// [미리보기 전용] 카메라를 포털 아래턱 가까이 가져간다. 바퀴가 4cm라 멀리서는
-// 점이고, 모서리를 넘는 순간을 봐야 한다. 세션에서는 헤드셋 포즈가 덮어쓴다.
-camera.position.set(1.7, 1.9, 0.7); // 벽·바닥·책상이 한 화면에 들어오게
+// [미리보기 전용] 첫 프레임까지의 기본 시점. 구멍이 뚫리면 aimPreviewCamera가
+// 그 앞으로 데려간다. 세션에서는 헤드셋 포즈가 덮어쓴다.
+camera.position.set(1.7, 1.9, 0.7);
 camera.lookAt(0, 0.4, -0.85);
 
 // ---------------------------------------------------------------------------
@@ -1784,7 +1906,8 @@ renderer.domElement.addEventListener('pointerdown', () => {
 // 들어오고, 세션 밖에서는 undefined다.
 let lastFrameTime = 0;
 
-renderer.setAnimationLoop((time, frame) => {
+/** 한 프레임. 이름을 붙여 둔 이유는 바로 아래 tick 창구 때문이다. */
+function renderFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
   // setAnimationLoop은 밀리초 타임스탬프를 준다. 첫 프레임은 이전 값이 없어
   // dt가 통째로 튀므로 버린다. 상한을 두는 건 탭이 백그라운드로 갔다 오면
   // dt가 몇 초짜리로 들어와서 다리가 순간이동하기 때문이다.
@@ -1808,17 +1931,17 @@ renderer.setAnimationLoop((time, frame) => {
   const shellFrame = frame ?? fakeRoomFrame;
   const shellSpace = fake ? fakeRoomSpace : renderer.xr.getReferenceSpace();
 
-  // 평면 메시를 먼저 갱신한다. 책상을 올릴 가구도, 포털 미리보기가 쏘는
-  // 레이도 이 메시를 읽는다 — 뒤에 두면 늘 한 프레임 묵은 자세를 본다.
+  // 평면 메시를 먼저 갱신한다. 책상을 올릴 가구가 이 메시를 읽는다 —
+  // 뒤에 두면 늘 한 프레임 묵은 자세를 본다.
   // 가짜 방도 함께 먹인다. 세션 밖에서 안 돌면 '평면' 버튼이 무엇을 켜고
   // 끄는지 데스크톱에서 볼 수가 없다.
   if (shellSpace !== null) updatePlanes(shellFrame, shellSpace);
   if (shellSpace !== null) {
     const newShells = roomShell.sync(shellFrame, shellSpace, viewerPosition);
     if (roomShell.removed.length > 0) rescueFrom(roomShell.removed);
-    // 평면이 늘었다. 포털이 걸린 벽이 이제야 들어왔을 수 있다.
+    // 평면이 늘었다. 파이프가 뚫린 면이 이제야 들어왔을 수 있다.
     //
-    // 'portalWall이 아직 null이면'으로 두면 안 된다 — 스캔한 적 없는 방에서는
+    // 'pipeHost가 아직 null이면'으로 두면 안 된다 — 스캔한 적 없는 방에서는
     // 영영 null이라, 매 프레임 모서리를 다시 세우게 된다.
     if (newShells.length > 0) needsRelink = true;
 
@@ -1832,13 +1955,21 @@ renderer.setAnimationLoop((time, frame) => {
           ` · 면 ${roomShell.surfaces.length}개 모서리 ${roomShell.edgeCount}개`,
       );
     }
-    // 포털이 걸린 벽은 평면이 들어온 뒤에야 알 수 있다. 찾을 때까지 매 프레임
-    // 두드린다 — 찾으면 portalWall이 차고, 그 뒤로는 바로 빠져나온다.
+    // 파이프가 뚫린 면은 평면이 들어온 뒤에야 알 수 있다. 찾을 때까지 매 프레임
+    // 두드린다 — 찾으면 pipeHost가 차고, 그 뒤로는 바로 빠져나온다.
 
-    aimPortalWallDown();
+    aimHostDown();
   }
 
-  // 아직 복도에 있고, 사람이 가까이서 포털 쪽을 보고 있으면 이제 나온다.
+  // 구멍을 뚫는다. 감지된 면이 하나라도 들어와 있어야 하므로 껍데기 갱신
+  // 뒤이고, 바퀴가 면의 자세를 읽기 전이어야 하므로 바퀴 갱신 앞이다.
+  if (!portalPlaced) {
+    tryPlacePipe(viewer, time);
+    // [미리보기 전용] 뚫린 자리가 난수다. 카메라를 그 앞으로 데려간다.
+    if (portalPlaced && frame === undefined) aimPreviewCamera();
+  }
+
+  // 아직 복도에 있고, 사람이 가까이서 구멍 쪽을 보고 있으면 이제 나온다.
   if (!hasEmerged && portalPlaced) {
     toPortal.subVectors(portal.position, viewerPosition);
     const distance = toPortal.length();
@@ -1934,11 +2065,14 @@ renderer.setAnimationLoop((time, frame) => {
     // 모서리를 넘었으면 다음 면으로 옮긴다.
     const next = transferIfCrossed(unit.roach, unit.surface);
     if (next !== unit.surface) {
-      // 포털에서 막 나왔다. 아래턱은 벽 한가운데에 있어서, 모서리를 넘을 때
-      // 쓰는 '새 면 안쪽' 기준이 위쪽을 가리킨다 — 그대로 두면 나온 바퀴가
-      // 포털 위 벽을 기어오른다. 손으로 세운 벽면은 사각형이 통째로 아래에
+      // 구멍에서 막 나왔다. 아래턱은 면 한가운데에 있어서, 모서리를 넘을 때
+      // 쓰는 '새 면 안쪽' 기준이 구멍 위쪽을 가리킨다 — 그대로 두면 나온 바퀴가
+      // 구멍 위 벽을 기어오른다. 손으로 세운 벽면은 사각형이 통째로 아래에
       // 있어서 이 문제가 없었다. 여기서는 방향을 못박는다.
-      if (unit.surface === corridorFloor && next === portalWall && next.drift !== null) {
+      //
+      // 바닥·천장에 뚫린 파이프에서는 drift가 null이라 이 줄이 통째로 건너
+      // 뛰어진다. 그 면에는 '아래'가 없으니 방향을 못박을 것도 없다.
+      if (unit.surface === corridorFloor && next === pipeHost && next.drift !== null) {
         unit.roach.setHeading(next.drift);
         unit.roach.setDrift(next.drift);
       }
@@ -1948,20 +2082,20 @@ renderer.setAnimationLoop((time, frame) => {
 
   // 포털 평면을 바퀴 쪽에 알려 주고, 두 복사본의 자세를 맞춘다.
   if (portalPlaced) {
-    // 포털을 놓은 자리에 면들을 맞춘다.
+    // 구멍이 뚫린 자리에 면들을 맞춘다.
     layOutSurfaces();
     if (needsRelink) {
       needsRelink = false;
       roomShell.rebuild();
-      linkPortalToWall();
+      linkPipeToHost();
     }
     for (const grid of surfaceGrids) grid.visible = frame === undefined;
 
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
-    // 자르는 평면은 포털 사각형이 아니라 벽보다도 조금 뒤에 둔다.
+    // 자르는 평면은 구멍 원판이 아니라 면보다도 조금 뒤에 둔다.
     //
-    // 포털은 z-fighting을 피하려고 벽에서 1cm 떠 있다. 그 자리에 평면을 두면
-    // 진짜 벽을 기어가는 바퀴가 전부 그 뒤에 있게 되고, 벽에 딱 맞추면 이번엔
+    // 구멍은 z-fighting을 피하려고 면에서 1cm 떠 있다. 그 자리에 평면을 두면
+    // 진짜 벽을 기어가는 바퀴가 전부 그 뒤에 있게 되고, 면에 딱 맞추면 이번엔
     // 벽과 바닥이 만나는 모서리가 평면 위에 걸린다 — 하필 바퀴가 가장 오래
     // 머무는 자리다. 두 상수의 주석 참고.
     portalPlanePoint
@@ -1976,20 +2110,15 @@ renderer.setAnimationLoop((time, frame) => {
   // 자세가 다 정해진 뒤에 행렬을 모은다. render보다 먼저여야 한다.
   roachBatch.sync();
 
-  if (frame !== undefined) {
-    const referenceSpace = renderer.xr.getReferenceSpace();
-    if (referenceSpace !== null && portalPlaced === false) {
-      updatePortalPreview(frame, referenceSpace);
-    }
-  }
-
   // 근접 페이드는 세션 밖에서도 돈다. 전에는 XR 안에서만 돌아서 데스크톱에서는
   // 한 번도 눈으로 볼 수 없었고, 그래서 잘못된 줄도 몰랐다. 머리 위치만
   // 있으면 되는 계산이라 미리보기 카메라로도 똑같이 돈다.
   if (portalPlaced) updatePortalFade(viewerPosition);
 
   renderer.render(scene, camera);
-});
+}
+
+renderer.setAnimationLoop(renderFrame);
 
 // ---------------------------------------------------------------------------
 // 미리보기 창구
@@ -2008,6 +2137,61 @@ Object.assign(window, {
     camera.position.set(px, py, pz);
     camera.lookAt(tx, ty, tz);
     return camera.position.toArray().map((c) => +c.toFixed(2));
+  },
+  /**
+   * 프레임을 n번 직접 돌린다.
+   *
+   * 브라우저 창이 가려져 있으면 requestAnimationFrame이 초당 한 번으로
+   * 묶인다. 바퀴가 구멍에서 나와 벽을 타고 내려오기까지는 수백 프레임이
+   * 걸리므로, 그 상태로는 '나오는지'를 아예 확인할 수 없다 — 10초를 보려고
+   * 10분을 기다리게 된다.
+   *
+   * 시각은 지어낸다. 루프는 들어온 시각의 차이만 보고 dt를 구하므로, 실제
+   * 벽시계와 맞을 필요가 없다. 사람이 안 보는 동안 장면만 앞으로 돌린다.
+   */
+  tick: (n = 60, dt = 1 / 60) => {
+    for (let i = 0; i < n; i += 1) renderFrame(lastFrameTime + dt * 1000);
+    return `${n}프레임 (${(n * dt).toFixed(1)}초)`;
+  },
+  // 구멍 앞으로 카메라를 다시 데려간다. 뚫린 자리가 난수라서 필요하다.
+  look: () => {
+    aimPreviewCamera();
+    return camera.position.toArray().map((c) => +c.toFixed(2));
+  },
+  // 구멍을 다른 자리로 다시 뚫는다. 자리가 난수라, 벽·바닥·천장 세 경우를
+  // 보려면 여러 번 돌려 봐야 한다.
+  repipe: () => {
+    repickPipe();
+    return '다음 프레임에 다시 뚫는다';
+  },
+  // 어느 면에 뚫을지 직접 집는 창구. 난수에 맡기면 천장에 뚫린 경우를
+  // 보려고 repipe를 열 번 돌려야 한다.
+  //
+  //   pipe(0)        0번 껍데기 면의 가운데에
+  //   pipe(2, 0.3)   2번 면의 로컬 x = 0.3에
+  pipe: (index = 0, x = 0, z?: number) => {
+    const shell = roomShell.surfaces[index];
+    if (shell === undefined) return '그런 면 없음';
+
+    const node = shell.surface.node;
+    node.updateMatrixWorld();
+    spotPoint.set(x, 0, z ?? shell.surface.boundCenterZ);
+    node.localToWorld(spotPoint);
+    node.getWorldQuaternion(spotQuaternion);
+    spotNormal.set(0, 1, 0).applyQuaternion(spotQuaternion).normalize();
+    pickSillDir(node, spotSill);
+
+    pipeHostLabel = shell.label;
+    portalPlaced = false;
+    placePipeAt(spotPoint, spotNormal, spotSill);
+    resetRoaches();
+    aimPreviewCamera();
+    return {
+      면: SURFACE_NAMES.get(shell.surface) ?? shell.label,
+      자리: spotPoint.toArray().map((c) => +c.toFixed(2)),
+      법선: spotNormal.toArray().map((c) => +c.toFixed(2)),
+      아래턱쪽: spotSill.toArray().map((c) => +c.toFixed(2)),
+    };
   },
   // 평면이 한 프레임 사라지는 일을 흉내 내는 창구.
   blink: (ms = 100) => {
@@ -2086,6 +2270,9 @@ Object.assign(window, {
         반폭: +s.surface.boundHalfX.toFixed(2),
         반깊이: +s.surface.boundHalfZ.toFixed(2),
         뒤집음: s.flipped,
+        // 파이프가 걸린 벽에만 '아래로'가 심긴다. 파이프를 옮기면 걷혀야 한다 —
+        // 안 걷으면 그 면의 바퀴들이 계속 한쪽으로만 내려간다.
+        목적: s.surface.drift === null ? null : +s.surface.drift.toFixed(2),
       };
     }),
   // 바퀴 하나를 껍데기 면 위에 올려놓는다. 모서리를 실제로 넘는지
@@ -2168,9 +2355,9 @@ async function startSession(): Promise<void> {
   // 'select'는 컨트롤러 트리거와 핸드 핀치를 모두 포함한다. 세션에 직접 붙이면
   // 어느 손/컨트롤러인지 신경 쓸 필요가 없다. three.js의 renderer.xr.getController(i)
   // 로도 같은 이벤트를 받을 수 있지만, 그건 컨트롤러를 씬에 그릴 때 쓰는 것이다.
-  session.addEventListener('select', placePortal);
+  session.addEventListener('select', repickPipe);
 
-  // 미리보기용으로 놓아 둔 가짜 포털을 지우고, 이 세션에서 다시 고르게 한다.
+  // 이 세션의 방에 맞춰 다시 뚫는다.
   resetPortal();
   // 바퀴도 복도 안으로 되돌린다. 세션마다 처음부터 시작해야 한다.
   resetRoaches();

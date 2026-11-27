@@ -440,6 +440,17 @@ function placePortal(): void {
 
 function resetPortal(): void {
   portalPlaced = false;
+
+  // 평면 오버레이를 다시 켠다. 벽을 고르는 단계라 이게 유일한 길잡이다.
+  //
+  // 전에는 평면 메시가 태어날 때 portalPlaced를 보고 자기 visible을 정했다.
+  // 손바닥 패널에서 껐다 켤 수 있게 그걸 showPlanes 하나로 모았는데, 여기서
+  // 되돌리는 걸 빠뜨렸다. 데스크톱 미리보기가 시작하자마자 가짜 포털을 놓으며
+  // showPlanes를 꺼 버리므로, 세션에 들어가면 진짜 방의 평면이 전부 안 보이는
+  // 채로 생겼다 — 벽을 가리켜도 아무 표시가 없다.
+  showPlanes = true;
+  applyPlaneVisibility();
+
   pointerRay.visible = false;
   portalPreview.visible = true;
   portalMask.visible = false;
@@ -1278,6 +1289,20 @@ const debugPanel = makeDebugPanel([
 ]);
 scene.add(debugPanel.group);
 
+/**
+ * 가짜 방 평면을 먹일지. immersive-ar이 안 되는 기기에서만 켠다.
+ *
+ * 가짜 방은 헤드셋 없이 이 코드가 돌게 하려고 둔 발판이다. 그런데 헤드셋에서도
+ * 세션에 들어가기 전까지는 frame이 없어서 그대로 돌았고, 가짜 평면으로 면을
+ * 만들고 그 면을 진짜로 치고 대비용 벽면·방 바닥을 그래프에서 빼 버렸다.
+ * 세션에 들어가면 가짜 평면은 사라지지만 빼 버린 건 돌아오지 않는다 —
+ * 스캔한 적 없는 방에서는 바퀴가 포털에서 나와 갈 데가 없어진다.
+ *
+ * 지원 여부를 알기 전까지는 꺼 둔다. 그 몇 프레임이 틀리는 것보다 헤드셋에
+ * 가짜 방이 한 프레임이라도 서는 편이 나쁘다.
+ */
+let useFakeRoom = false;
+
 /** 화면 갱신율. 매 프레임 출렁여서 천천히 따라가게 둔다. */
 let fps = 0;
 
@@ -1444,8 +1469,9 @@ renderer.setAnimationLoop((time, frame) => {
   // 세션 밖에서는 가짜 방을 먹인다. detectedPlanes는 XR에만 와서, 이게 없으면
   // 이 코드는 데스크톱에서 한 줄도 돌지 않는다 — 맞는지 틀렸는지 알 수가 없다.
   // 미리보기 전용 발판이다.
+  const fake = frame === undefined && useFakeRoom;
   const shellFrame = frame ?? fakeRoomFrame;
-  const shellSpace = frame === undefined ? fakeRoomSpace : renderer.xr.getReferenceSpace();
+  const shellSpace = fake ? fakeRoomSpace : renderer.xr.getReferenceSpace();
   if (shellSpace !== null) {
     const newShells = roomShell.sync(shellFrame, shellSpace, viewerPosition);
     // 평면이 늘었다. 포털이 걸린 벽이 이제야 들어왔을 수 있다.
@@ -1802,6 +1828,8 @@ async function checkSupport(): Promise<void> {
 
   if (supported === false) {
     enterButton.textContent = 'immersive-ar 미지원';
+    // 여기서는 진짜 평면이 영영 오지 않는다. 가짜 방을 먹여 눈으로 볼 수 있게.
+    useFakeRoom = true;
     return;
   }
 

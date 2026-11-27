@@ -47,9 +47,12 @@ export interface TrackedHand {
    * 손바닥이 보는 쪽(월드, 단위). 손등이 아니라 바닥에서 나오는 쪽이다.
    *
    * 손목에서 검지 중수골로, 손목에서 새끼 중수골로 뻗은 두 벡터의 외적이다.
-   * 왼손을 펴서 얼굴 쪽으로 돌리면 검지 쪽이 오른쪽, 새끼 쪽이 왼쪽이고,
-   * 오른손 법칙으로 외적은 얼굴 쪽을 향한다. 오른손은 두 쪽이 뒤바뀌므로
-   * 부호를 뒤집어 준다.
+   *
+   * 부호는 기기에서 확인한 것이다. 왼손을 펴서 얼굴 쪽으로 돌리면 검지 쪽이
+   * 오른쪽, 새끼 쪽이 왼쪽이니 오른손 법칙으로 외적이 얼굴을 향할 거라고 보고
+   * 짰는데, Quest에서는 반대였다 — 패널이 손바닥이 아니라 손등에 떴다.
+   * 중수골의 자리가 손목 중심이 아니라 손등 쪽으로 치우쳐 있어서인 듯하다.
+   * 어느 쪽이든 추측으로 둘 수 없는 값이라, 본 대로 적는다.
    */
   palmNormal: THREE.Vector3;
   /** 손바닥 평면 위에서 손가락 쪽(월드, 단위). 패널의 위쪽으로 쓴다. */
@@ -194,7 +197,7 @@ export function makeHandTracker(): HandTracker {
           towardPinky.subVectors(palmPoints[2], palmPoints[0]);
           hand.palmNormal
             .crossVectors(towardIndex, towardPinky)
-            .multiplyScalar(hand.handedness === 'left' ? 1 : -1)
+            .multiplyScalar(hand.handedness === 'left' ? -1 : 1)
             .normalize();
           // 손가락 쪽. 두 중수골의 중점이 손목에서 뻗은 방향이다. 둘 다
           // 손바닥 평면 위의 벡터라 그 평균도 평면 위에 있다 — 따로 눕힐

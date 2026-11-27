@@ -381,6 +381,12 @@ const pointerRay = new THREE.Line(
 pointerRay.visible = false;
 scene.add(pointerRay);
 
+/**
+ * 포털 사각형을 벽에서 이만큼 띄운다(m). 벽과 완전히 같은 평면에 두면
+ * z-fighting이 난다.
+ */
+const PORTAL_WALL_GAP = 0.01;
+
 /** 벽에 '똑바로' 거는 자세를 만든다. 벽 평면의 로컬 축을 그대로 쓰지 않는
  *  이유는, 로컬 X/Z 중 어느 쪽이 세로인지 스펙이 보장하지 않기 때문이다.
  *  월드 업과 법선으로 직접 기저를 만들면 그 가정이 필요 없다. */
@@ -391,7 +397,7 @@ function orientPortal(point: THREE.Vector3, normal: THREE.Vector3): void {
 
   portal.quaternion.setFromRotationMatrix(basisMatrix);
   // 벽과 완전히 같은 평면에 두면 z-fighting이 난다. 1cm 띄운다.
-  portal.position.copy(point).addScaledVector(normal, 0.01);
+  portal.position.copy(point).addScaledVector(normal, PORTAL_WALL_GAP);
 }
 
 /** 확정 전까지 매 프레임 호출. 가리키는 자리로 포털을 옮겨 둔다. */
@@ -1440,6 +1446,8 @@ function applySmashes(): void {
 }
 
 const viewerPosition = new THREE.Vector3();
+/** 자르는 평면이 놓일 자리(월드). 포털이 아니라 벽 위다. */
+const portalPlanePoint = new THREE.Vector3();
 /** 가짜 손을 눈앞에 세우는 데 쓴다. 미리보기 전용. */
 const viewerQuaternion = new THREE.Quaternion();
 /** 위 값을 면 로컬로 옮긴 것. 마리마다 면이 달라 매번 다시 만든다. */
@@ -1638,7 +1646,14 @@ renderer.setAnimationLoop((time, frame) => {
     for (const grid of surfaceGrids) grid.visible = frame === undefined;
 
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
-    setPortalPlane(portal.position, portalFacing);
+    // 자르는 평면은 포털 사각형이 아니라 '벽'에 둔다.
+    //
+    // 포털은 z-fighting을 피하려고 벽에서 1cm 떠 있다. 그 자리에 평면을 두면,
+    // 진짜 벽을 기어가는 바퀴는 전부 그 뒤에 있게 된다 — 구멍으로만 보이는
+    // 복사본만 그려지니 벽 위에서는 몸이 통째로 사라진다. 손으로 세운 벽면은
+    // 포털보다 더 앞에 있어서 이 문제가 없었다.
+    portalPlanePoint.copy(portal.position).addScaledVector(portalFacing, -PORTAL_WALL_GAP);
+    setPortalPlane(portalPlanePoint, portalFacing);
   } else {
     disablePortalPlane();
   }

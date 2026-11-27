@@ -87,6 +87,15 @@ const MIN_EXTENT = 0.4;
 const EDGE_MARGIN = 0.02;
 
 /**
+ * 면을 평면에서 이만큼 띄운다(m).
+ *
+ * 바퀴의 발이 평면과 정확히 같은 높이에 있으면, 포털을 자르는 평면이 벽 위에
+ * 놓였을 때 발이 그 평면에 걸터앉아 프레임마다 잘렸다 말았다 한다. 평면
+ * 오버레이와의 z-fighting도 같이 사라진다. 2mm는 눈에 안 보인다.
+ */
+const SURFACE_LIFT = 0.002;
+
+/**
  * 두 법선의 외적 길이가 이보다 짧으면 모서리를 만들지 않는다.
  *
  * 외적의 길이는 두 법선이 이루는 각의 sin이다. 0.1이면 6° 안쪽 — 마주 보는
@@ -361,6 +370,7 @@ export function makeRoomShell(
     // 면의 원점을 사각형의 중심에 둔다. WalkSurface의 범위는 x에 대해
     // 대칭(±halfX)이라, 원점이 중심에 있지 않으면 표현할 수가 없다.
     // 위치는 부모(자세 노드)의 좌표계라 뒤집기와 무관하다.
+    // y는 decideFlips가 채운다. 띄우는 방향이 뒤집기에 달려 있기 때문이다.
     shell.surface.node.position.set(rect.centerX, 0, rect.centerZ);
 
     shell.surface.boundHalfX = Math.max(0, rect.halfX - EDGE_MARGIN);
@@ -405,6 +415,9 @@ export function makeRoomShell(
       const flip = planeNormal.dot(towardInside) < 0;
       // 로컬 X축으로 180°. +Y와 +Z가 뒤집히고 오른손 좌표계는 유지된다.
       shell.surface.node.rotation.set(flip ? Math.PI : 0, 0, 0);
+      // 면을 평면에서 살짝 띄운다. 위치는 부모(자세 노드)의 좌표계라 뒤집기가
+      // 안 먹으므로, 어느 쪽이 바깥인지를 여기서 직접 반영한다.
+      shell.surface.node.position.y = flip ? -SURFACE_LIFT : SURFACE_LIFT;
       shell.flipped = flip;
     }
   }

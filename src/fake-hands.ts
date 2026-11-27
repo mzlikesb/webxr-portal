@@ -70,12 +70,16 @@ export function updateFakeHands(
  * 손 하나를 통째로 아무 자리·자세·속도로 둔다.
  *
  * 때리기 판정은 손바닥이 면을 마주 보는지, 얼마나 빨랐는지로 가른다. 그건
- * 머리로 맞출 수 있는 값이 아니라 실제로 돌려 봐야 하는 값이다. 손가락 끝 다섯
- * 개도 같은 자리에 둔다 — 판정이 그 여섯 점을 다 보기 때문이다.
+ * 머리로 맞출 수 있는 값이 아니라 실제로 돌려 봐야 하는 값이다.
+ *
+ * 손바닥과 손가락 끝을 따로 받는다. 내려칠 때는 손바닥이 벌레 위로 오고,
+ * 찌를 때는 손가락만 닿고 손바닥은 한 뼘 뒤에 남는다 — 그 차이를 그대로
+ * 만들 수 있어야 판정을 시험할 수 있다.
  */
 export function setFakeHand(
   handedness: 'left' | 'right',
-  point: THREE.Vector3,
+  palmPoint: THREE.Vector3,
+  tipPoint: THREE.Vector3,
   palmNormal: THREE.Vector3,
   velocity: THREE.Vector3,
   peakSpeed: number,
@@ -84,8 +88,8 @@ export function setFakeHand(
   if (hand === undefined) return;
 
   hand.tracked = true;
-  hand.palm.copy(point);
-  for (const tip of hand.tips) tip.copy(point);
+  hand.palm.copy(palmPoint);
+  for (const tip of hand.tips) tip.copy(tipPoint);
   hand.palmNormal.copy(palmNormal).normalize();
   hand.palmVelocity.copy(velocity);
   hand.peakSpeed = peakSpeed;
@@ -103,7 +107,7 @@ export function setFakeFingertip(x: number, y: number, z: number): void {
 
 /** 오른손을 치운다. 때려 본 뒤 계속 거기 있으면 매 프레임 때리게 된다. */
 export function clearFakeHand(): void {
-  setFakeHand('right', AWAY, UP_AXIS, ZERO, 0);
+  setFakeHand('right', AWAY, AWAY, UP_AXIS, ZERO, 0);
 }
 
 const UP_AXIS = new THREE.Vector3(0, 1, 0);

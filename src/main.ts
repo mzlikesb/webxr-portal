@@ -413,6 +413,19 @@ scene.add(pointerRay);
  */
 const PORTAL_WALL_GAP = 0.01;
 
+/**
+ * 자르는 평면을 벽보다 이만큼 더 뒤에 둔다(m).
+ *
+ * 평면을 벽에 딱 맞춰 두었더니 이번엔 벽과 바닥이 만나는 모서리가 문제가 됐다.
+ * 주촉성 때문에 바퀴는 그 모서리에 붙어 사는데, 거기가 평면 위라 몸이 반쯤
+ * 잘린다. 벽-천장 모서리도, 포털 벽과 옆벽이 만나는 구석도 마찬가지다.
+ *
+ * 평면을 벽 속으로 조금 밀어 넣으면 방 전체가 한쪽에 안전하게 들어온다.
+ * 이 3cm 띠 안에 있는 것은 구멍 안의 복도뿐이고, 복도에서 기다리는 자리는
+ * 거기서 50cm는 더 뒤다.
+ */
+const PORTAL_CLIP_DEPTH = 0.03;
+
 /** 벽에 '똑바로' 거는 자세를 만든다. 벽 평면의 로컬 축을 그대로 쓰지 않는
  *  이유는, 로컬 X/Z 중 어느 쪽이 세로인지 스펙이 보장하지 않기 때문이다.
  *  월드 업과 법선으로 직접 기저를 만들면 그 가정이 필요 없다. */
@@ -689,10 +702,11 @@ function updatePortalFade(headPosition: THREE.Vector3): void {
 }
 
 // ---------------------------------------------------------------------------
-// 7) 바퀴벌레 (작업 중)
+// 7) 바퀴벌레
 //
-//    지금은 걸음새만 맞추는 단계라 2D 미리보기 카메라 앞에 임시로 세워 둔다.
-//    포털 안에 둘지 진짜 방 바닥에 둘지는 아직 안 정했다.
+//    포털 안쪽 복도에서 기다리다, 사람이 다가오면 아래턱을 넘어 벽으로 나온다.
+//    거기서부터는 감지된 방이 무대다 — 벽을 타고 내려와 바닥을 돌고 책상에
+//    오른다.
 // ---------------------------------------------------------------------------
 // ④에서 씬 조명을 포털 안으로 옮겼다. 포털 바깥에 조명을 받는 물체가
 // 바퀴벌레 하나 생겼으므로 다시 들인다. AR에서는 실제 방의 조명 정보가
@@ -819,7 +833,7 @@ function forwardExitOf(surface: WalkSurface): number | null {
   return null;
 }
 
-/** [임시] 프로브에서 면을 이름으로 보려고 둔 표. 합치기 전에 지운다. */
+/** 미리보기 콘솔 창구가 면을 이름으로 보여 주려고 두는 표. */
 const SURFACE_NAMES = new Map<WalkSurface, string>();
 
 /** 지금 올라서 있는 면의 설정을 바퀴에게 적용한다. */
@@ -883,7 +897,7 @@ const TABLE_SIDE_DIRS = [
 ];
 const tableSides = TABLE_SIDE_DIRS.map(() => makeWalkSurface(scene));
 
-// [임시] 프로브용 이름표. 합치기 전에 지운다.
+// 미리보기 창구용 이름표.
 SURFACE_NAMES.set(corridorFloor, '복도');
 SURFACE_NAMES.set(wallFace, '벽면');
 SURFACE_NAMES.set(roomFloor, '방바닥');
@@ -1199,8 +1213,9 @@ function layOutSurfaces(): void {
 let needsRelink = false;
 
 
-// 걸음이 미끄러지는지, 모서리를 어떻게 넘는지 보려면 면에 무늬가 있어야
-// 한다. 면마다 하나씩. 임시.
+// [미리보기 전용] 걸음이 미끄러지는지, 모서리를 어떻게 넘는지 보려면 면에
+// 무늬가 있어야 한다. 포털이 만드는 면마다 하나씩. 세션 안에서는 끈다 —
+// 거기서는 진짜 벽과 책상이 보이니 무늬가 필요 없다.
 const surfaceGrids = [
   { surface: corridorFloor, size: 0.4, offsetZ: -0.2, stretchX: 1 }, // 아래턱 안쪽
   { surface: wallFace, size: 0.4, offsetZ: 0.2, stretchX: 1 }, // 아래턱 아래쪽
@@ -1416,7 +1431,11 @@ function aimPortalWallDown(): void {
 
 /** 껍데기 면에 깔아 둔 격자들. 손바닥 패널에서 껐다 켠다. */
 const shellGrids: THREE.GridHelper[] = [];
-let showGrids = true;
+/**
+ * 기본은 꺼 둔다. 감지된 방의 면은 진짜 벽·바닥 위에 겹쳐 있어서, 켜 두면
+ * 방 전체에 격자가 덮인다. 어디까지 걸을 수 있는지 보고 싶을 때만 켠다.
+ */
+let showGrids = false;
 
 /** 새로 생긴 껍데기 면에 격자를 깔아 눈으로 확인한다. */
 function addShellGrid(shell: ShellSurface): void {
@@ -1480,8 +1499,8 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
   roachBatch.register(crossing.inside);
 }
 
-// 데스크톱 미리보기용 가짜 포털. 헤드셋 없이는 이 그림을 아예 볼 수 없다.
-// 세션에 들어가면 resetPortal이 지우고 네가 직접 놓게 한다. 임시.
+// [미리보기 전용] 가짜 포털. 헤드셋 없이는 이 그림을 아예 볼 수 없다.
+// 세션에 들어가면 resetPortal이 지우고 사람이 직접 놓는다.
 portal.position.set(0, 1.2, -1.3);
 portal.quaternion.identity(); // 로컬 +Z가 법선이라 그대로 카메라를 향한다
 portalPoint.copy(portal.position);
@@ -1489,9 +1508,9 @@ placePortal();
 
 layOutSurfaces();
 
-// 미리보기 카메라를 포털 아래턱 가까이 가져간다. 바퀴가 4cm라 멀리서는 점이고,
-// 모서리를 넘는 순간을 봐야 한다. 세션에서는 이 값이 헤드셋 포즈에 덮인다. 임시.
-camera.position.set(1.7, 1.9, 0.7); // 임시: 벽·바닥·책상이 한 화면에 들어오게
+// [미리보기 전용] 카메라를 포털 아래턱 가까이 가져간다. 바퀴가 4cm라 멀리서는
+// 점이고, 모서리를 넘는 순간을 봐야 한다. 세션에서는 헤드셋 포즈가 덮어쓴다.
+camera.position.set(1.7, 1.9, 0.7); // 벽·바닥·책상이 한 화면에 들어오게
 camera.lookAt(0, 0.4, -0.85);
 
 // ---------------------------------------------------------------------------
@@ -1554,6 +1573,10 @@ let useFakeRoom = false;
 /** 패널이 한 번이라도 터졌는지. 그 뒤로는 손대지 않는다. */
 let panelFailed = false;
 
+/** 지금까지 짜부러진 마리 수와, 마지막으로 먹힌 때림의 세기. 패널에 적는다. */
+let squashed = 0;
+let lastSmash = '';
+
 /** 화면 갱신율. 매 프레임 출렁여서 천천히 따라가게 둔다. */
 let fps = 0;
 
@@ -1561,7 +1584,7 @@ let fps = 0;
  * 잡힌 평면을 라벨별로 센 것. 'wall 4 · door 2'처럼.
  *
  * 스캔된 방은 라벨이 열 가지씩 나온다. 한 줄에 다 넣으면 글자가 깨알이 되니
- * 넷씩 끊어 여러 줄로 돌려준다.
+ * 다섯씩 끊어 여러 줄로 돌려준다.
  */
 function planeSummary(): string[] {
   const counts = new Map<string, number>();
@@ -1573,7 +1596,7 @@ function planeSummary(): string[] {
 
   const parts = [...counts].map(([label, n]) => `${label} ${n}`);
   const rows: string[] = [];
-  for (let i = 0; i < parts.length; i += 4) rows.push(parts.slice(i, i + 4).join(' · '));
+  for (let i = 0; i < parts.length; i += 5) rows.push(parts.slice(i, i + 5).join(' · '));
   return rows;
 }
 
@@ -1592,7 +1615,7 @@ const TOUCH_HEIGHT = 0.07;
 /** 최근 최고 속력이 이보다 빨랐어야 내려친 것으로 친다(m/s). */
 const SMASH_SPEED = 1.4;
 /** 내려칠 때 손바닥이 면에서 이 거리 안이어야 한다(m). */
-const SMASH_HEIGHT = 0.05;
+const SMASH_HEIGHT = 0.07;
 /** 손바닥에 깔리는 범위(m). */
 const SMASH_RADIUS = 0.09;
 
@@ -1643,11 +1666,16 @@ function applySmashes(hands: TrackedHand[]): void {
   for (const hand of hands) {
     if (!hand.tracked) continue;
 
-    // 손바닥 하나가 아니라 손 전체로 친다.
+    // 때리는 건 손바닥으로만 친다.
     //
-    // 손바닥 중심은 손목과 중수골의 중점이라 손가락 끝보다 한참 뒤에 있다.
-    // 사람은 벌레를 손가락 쪽으로 겨냥해 때리므로, 손바닥만 보면 영영 안 맞는다.
-    for (const point of [hand.palm, ...hand.tips]) {
+    // 처음에는 손가락 끝 다섯 개도 접촉점으로 넣었다. 손바닥 중심이 손가락보다
+    // 한참 뒤에 있어서 그러지 않으면 안 맞는다고 봤는데, 그 때문에 손가락
+    // 하나를 갖다 대는 것도 때린 게 됐다. 손바닥이 면을 보는지까지 따져도
+    // 마찬가지였다 — 바닥의 벌레를 손가락으로 찌를 때도 손바닥은 아래를 본다.
+    //
+    // 내려칠 때는 손바닥이 벌레 위로 온다. 찌를 때는 손바닥이 한 뼘 뒤에 남는다.
+    // 접촉점을 손바닥 하나로 되돌리고, 대신 닿았다고 보는 거리를 조금 넓혔다.
+    for (const point of [hand.palm]) {
       for (const unit of units) {
         if (unit.roach.isSquashed()) continue;
 
@@ -1684,11 +1712,9 @@ function applySmashes(hands: TrackedHand[]): void {
         if (hand.peakSpeed < SMASH_SPEED) continue;
 
         unit.roach.squash();
-        // [임시] 어떤 값에서 죽었는지. 기기에서 세기를 다시 맞출 때 쓴다.
-        log(
-          `${units.indexOf(unit)}번 짜부러짐` +
-            ` (속력 ${hand.peakSpeed.toFixed(2)} · 마주봄 ${(-facing).toFixed(2)})`,
-        );
+        squashed += 1;
+        // 때린 세기는 패널에 적는다. 기기에서 기준을 다시 맞출 때 쓴다.
+        lastSmash = `${hand.peakSpeed.toFixed(1)}m/s · ${(-facing).toFixed(2)}`;
       }
     }
   }
@@ -1705,16 +1731,13 @@ const viewerForward = new THREE.Vector3();
 const toPortal = new THREE.Vector3();
 
 // 데스크톱에서 놀라는 걸 확인하려면 누를 데가 있어야 한다. 미리보기 카메라는
-// 가만히 있어서 '다가옴'이 영영 일어나지 않는다. 임시.
+// 가만히 있어서 '다가옴'이 영영 일어나지 않는다.
 renderer.domElement.addEventListener('pointerdown', () => {
   // 미리보기 카메라는 움직이지 않아서 '다가옴'이 일어나지 않는다.
   // 첫 클릭은 바퀴를 불러내고, 그 뒤로는 놀래킨다.
   if (!hasEmerged) beginEmerging();
   else for (const unit of units) unit.roach.scare(viewerPosition.x, viewerPosition.z);
 });
-
-/** 걸음새를 눈으로 맞추려고 둔 임시 슬라이더. 바퀴가 스스로 고른 속도에 곱한다. */
-const speedSlider = document.querySelector('#speed') as HTMLInputElement | null;
 
 // ---------------------------------------------------------------------------
 // 8) 렌더 루프
@@ -1725,7 +1748,6 @@ const speedSlider = document.querySelector('#speed') as HTMLInputElement | null;
 // setAnimationLoop의 콜백은 (시간, XRFrame)을 받는다. frame은 XR 세션 중에만
 // 들어오고, 세션 밖에서는 undefined다.
 let lastFrameTime = 0;
-let costTimer = 0;
 
 renderer.setAnimationLoop((time, frame) => {
   // setAnimationLoop은 밀리초 타임스탬프를 준다. 첫 프레임은 이전 값이 없어
@@ -1767,7 +1789,7 @@ renderer.setAnimationLoop((time, frame) => {
 
     for (const shell of newShells) {
       addShellGrid(shell);
-      // [임시] 넘어간 기록을 읽을 수 있게 이름을 붙여 둔다.
+      // 미리보기 창구에서 읽을 수 있게 이름을 붙여 둔다.
       SURFACE_NAMES.set(shell.surface, `${shell.label}${SURFACE_NAMES.size}`);
       log(
         `껍데기 면 ${shell.label} ${shell.width.toFixed(2)}×${shell.depth.toFixed(2)}m` +
@@ -1824,9 +1846,14 @@ renderer.setAnimationLoop((time, frame) => {
   if (!panelFailed) {
     try {
       if (debugPanel.group.visible) {
+        // 렌더 비용은 직전 프레임 것이다. 이 줄이 renderer.render보다 앞이라
+        // 그렇고, 한 프레임 묵은 숫자로 충분하다.
+        const cost = renderer.info.render;
         debugPanel.setLines([
-          `${fps.toFixed(0)} fps · 평면 ${planeMeshes.size}개`,
-          `껍데기 ${roomShell.surfaces.length}면 · 모서리 ${roomShell.edgeCount}개`,
+          `${fps.toFixed(0)} fps · 드로우콜 ${cost.calls} · 삼각형 ${cost.triangles}`,
+          `평면 ${planeMeshes.size} · 껍데기 ${roomShell.surfaces.length}면` +
+            ` · 모서리 ${roomShell.edgeCount}`,
+          `짜부 ${squashed}마리${lastSmash === '' ? '' : ` (마지막 ${lastSmash})`}`,
           ...planeSummary(),
         ]);
       }
@@ -1838,7 +1865,6 @@ renderer.setAnimationLoop((time, frame) => {
     }
   }
 
-  const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);
 
   // ── 서로 비키기 ──
   //
@@ -1865,7 +1891,7 @@ renderer.setAnimationLoop((time, frame) => {
     viewerLocal.copy(viewerPosition);
     unit.surface.node.worldToLocal(viewerLocal);
 
-    unit.roach.update(dt, speedScale, viewerLocal);
+    unit.roach.update(dt, 1, viewerLocal);
 
     // 짜부러진 놈은 그 자리에 그대로 둔다.
     if (unit.roach.isSquashed()) continue;
@@ -1873,11 +1899,6 @@ renderer.setAnimationLoop((time, frame) => {
     // 모서리를 넘었으면 다음 면으로 옮긴다.
     const next = transferIfCrossed(unit.roach, unit.surface);
     if (next !== unit.surface) {
-      // [임시] 어디서 어디로 넘어갔는지. 합치기 전에 지운다.
-      log(
-        `${units.indexOf(unit)}번 ${SURFACE_NAMES.get(unit.surface)}` +
-          ` → ${SURFACE_NAMES.get(next)}`,
-      );
       // 포털에서 막 나왔다. 아래턱은 벽 한가운데에 있어서, 모서리를 넘을 때
       // 쓰는 '새 면 안쪽' 기준이 위쪽을 가리킨다 — 그대로 두면 나온 바퀴가
       // 포털 위 벽을 기어오른다. 손으로 세운 벽면은 사각형이 통째로 아래에
@@ -1902,13 +1923,15 @@ renderer.setAnimationLoop((time, frame) => {
     for (const grid of surfaceGrids) grid.visible = frame === undefined;
 
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);
-    // 자르는 평면은 포털 사각형이 아니라 '벽'에 둔다.
+    // 자르는 평면은 포털 사각형이 아니라 벽보다도 조금 뒤에 둔다.
     //
-    // 포털은 z-fighting을 피하려고 벽에서 1cm 떠 있다. 그 자리에 평면을 두면,
-    // 진짜 벽을 기어가는 바퀴는 전부 그 뒤에 있게 된다 — 구멍으로만 보이는
-    // 복사본만 그려지니 벽 위에서는 몸이 통째로 사라진다. 손으로 세운 벽면은
-    // 포털보다 더 앞에 있어서 이 문제가 없었다.
-    portalPlanePoint.copy(portal.position).addScaledVector(portalFacing, -PORTAL_WALL_GAP);
+    // 포털은 z-fighting을 피하려고 벽에서 1cm 떠 있다. 그 자리에 평면을 두면
+    // 진짜 벽을 기어가는 바퀴가 전부 그 뒤에 있게 되고, 벽에 딱 맞추면 이번엔
+    // 벽과 바닥이 만나는 모서리가 평면 위에 걸린다 — 하필 바퀴가 가장 오래
+    // 머무는 자리다. 두 상수의 주석 참고.
+    portalPlanePoint
+      .copy(portal.position)
+      .addScaledVector(portalFacing, -(PORTAL_WALL_GAP + PORTAL_CLIP_DEPTH));
     setPortalPlane(portalPlanePoint, portalFacing);
   } else {
     disablePortalPlane();
@@ -1931,34 +1954,31 @@ renderer.setAnimationLoop((time, frame) => {
   if (portalPlaced) updatePortalFade(viewerPosition);
 
   renderer.render(scene, camera);
-
-  // 렌더 비용을 눈으로 보려고 가끔 찍는다. 세션 안에서는 2D UI가 안 보이므로
-  // 콘솔로도 나가야 의미가 있다(log가 양쪽에 쓴다).
-  costTimer += dt;
-  if (costTimer > 3) {
-    costTimer = 0;
-    const info = renderer.info.render;
-    log(
-      `바퀴 ${units.length}마리 · 드로우콜 ${info.calls} · 삼각형 ${info.triangles}` +
-        ` · 묶음 ${roachBatch.poolCount()}`,
-    );
-  }
 });
 
-// [임시] 미리보기에서 바퀴가 범위 안에 있는지 콘솔로 확인하려고 둔 창구.
-// 합치기 전에 지운다.
+// ---------------------------------------------------------------------------
+// 미리보기 창구
+//
+// 이 작품은 헤드셋에서만 제대로 도는데, 헤드셋 안에서는 콘솔도 DOM도 못 본다.
+// 그래서 데스크톱 미리보기가 유일하게 계측할 수 있는 자리다 — 가짜 방 평면과
+// 가짜 손이 그 자리를 만들고, 아래 창구들이 그걸 읽고 흔든다.
+//
+// immersive-ar이 되는 기기에서는 가짜 방도 가짜 손도 돌지 않으므로, 이 창구들은
+// 거기서 아무것도 하지 않는다.
+// ---------------------------------------------------------------------------
 Object.assign(window, {
-  // [임시] 평면이 한 프레임 사라지는 일을 흉내 내는 창구.
+  // 평면이 한 프레임 사라지는 일을 흉내 내는 창구.
   blink: (ms = 100) => {
     blinkFakeRoom(ms);
     return `${ms}ms 동안 평면 목록을 비운다`;
   },
-  // [임시] 때리기를 미리보기에서 시험하는 창구. 세기를 가르는 값은 머리로
+  // 때리기를 미리보기에서 시험하는 창구. 세기를 가르는 값은 머리로
   // 맞출 수 없어서, 실제로 돌려 보고 정한다.
-  //   slap(0, 2, true)   손바닥을 면으로 향한 채 빠르게  → 죽어야 한다
-  //   slap(0, 0.2, true) 천천히 갖다 대기               → 살아야 한다
-  //   slap(0, 2, false)  빠르지만 손바닥이 딴 데        → 살아야 한다
-  slap: (which = 0, speed = 2, facing = true) => {
+  //   slap(0, 2, true)         손바닥으로 빠르게      → 죽어야 한다
+  //   slap(0, 0.2, true)       천천히 갖다 대기       → 살아야 한다
+  //   slap(0, 2, false)        손바닥이 딴 데를 봄    → 살아야 한다
+  //   slap(0, 2, true, true)   손가락만 빠르게 찌르기 → 살아야 한다
+  slap: (which = 0, speed = 2, facing = true, finger = false) => {
     const unit = units[which];
     if (unit === undefined) return '그런 바퀴 없음';
 
@@ -1974,7 +1994,17 @@ Object.assign(window, {
     const palmNormal = facing
       ? normal.clone().negate()
       : new THREE.Vector3(1, 0, 0).applyQuaternion(quat);
-    setFakeHand('right', point, palmNormal, normal.clone().multiplyScalar(-speed), speed);
+
+    // 찌르는 손은 손가락만 벌레에 닿고 손바닥은 한 뼘 뒤에 남는다.
+    const palmPoint = finger ? point.clone().addScaledVector(normal, 0.1) : point;
+    setFakeHand(
+      'right',
+      palmPoint,
+      point,
+      palmNormal,
+      normal.clone().multiplyScalar(-speed),
+      speed,
+    );
     return SURFACE_NAMES.get(unit.surface) ?? '?';
   },
   unslap: () => {
@@ -1982,7 +2012,7 @@ Object.assign(window, {
     return units.map((u) => u.roach.isSquashed());
   },
   squashed: () => units.map((u) => u.roach.isSquashed()),
-  // [임시] 손바닥 패널의 버튼을 눌러 보는 창구. 미리보기에는 진짜 손가락이
+  // 손바닥 패널의 버튼을 눌러 보는 창구. 미리보기에는 진짜 손가락이
   // 없어서, 패널 로컬 좌표(미터)를 받아 가짜 검지를 거기 갖다 댄다.
   poke: (index = 0) => {
     const point = debugPanel.buttonPoint(index, new THREE.Vector3());
@@ -1998,7 +2028,7 @@ Object.assign(window, {
     보임: debugPanel.group.visible,
     자리: debugPanel.group.position.toArray().map((c) => +c.toFixed(2)),
   }),
-  // [임시] 껍데기 면들의 자리와 법선. 전부 방 안쪽을 봐야 한다.
+  // 껍데기 면들의 자리와 법선. 전부 방 안쪽을 봐야 한다.
   shell: () =>
     roomShell.surfaces.map((s) => {
       const p = s.surface.node.getWorldPosition(new THREE.Vector3());
@@ -2016,7 +2046,7 @@ Object.assign(window, {
         뒤집음: s.flipped,
       };
     }),
-  // [임시] 바퀴 하나를 껍데기 면 위에 올려놓는다. 모서리를 실제로 넘는지
+  // 바퀴 하나를 껍데기 면 위에 올려놓는다. 모서리를 실제로 넘는지
   // 보려고 둔 창구다 — 껍데기는 아직 손으로 세운 면들과 이어져 있지 않아서
   // 걸어서 갈 길이 없다.
   drop: (index = 0, which = 0, x = 0, z = 0, heading = Math.random() * Math.PI * 2) => {
@@ -2028,7 +2058,7 @@ Object.assign(window, {
     applySurface(unit);
     return SURFACE_NAMES.get(shell.surface);
   },
-  // [임시] 껍데기 면들이 서로 어떻게 이어졌는지. 상자 방이면 벽-바닥 넷,
+  // 껍데기 면들이 서로 어떻게 이어졌는지. 상자 방이면 벽-바닥 넷,
   // 벽-천장 넷, 벽-벽 넷 = 열두 쌍이 나와야 한다.
   edges: () =>
     roomShell.surfaces.flatMap((s) =>
@@ -2044,7 +2074,7 @@ Object.assign(window, {
         중심: +e.alongCenter.toFixed(2),
       })),
     ),
-  // [임시] 책상 네 옆면의 원점 높이. 전부 책상 높이여야 한다.
+  // 책상 네 옆면의 원점 높이. 전부 책상 높이여야 한다.
   sides: () =>
     tableSides.map((side) => +side.node.getWorldPosition(new THREE.Vector3()).y.toFixed(3)),
   probe: () =>

@@ -1,5 +1,10 @@
 import * as THREE from 'three';
-import { linkSurfaces, makeWalkSurface, type WalkSurface } from './walk-surface';
+import {
+  linkSurfaces,
+  makeWalkSurface,
+  type SurfaceEdge,
+  type WalkSurface,
+} from './walk-surface';
 
 // ---------------------------------------------------------------------------
 // 감지된 평면을 걸을 수 있는 면으로
@@ -47,6 +52,12 @@ import { linkSurfaces, makeWalkSurface, type WalkSurface } from './walk-surface'
 // 한 점은 두 평면 방정식을 풀면 나온다. 거기까지는 무한 평면 이야기라서,
 // 양쪽 사각형으로 잘라 실제로 둘 다 닿는 구간만 남긴다. 상자 모양 방이면
 // 여섯 면에서 벽-바닥 넷, 벽-천장 넷, 벽-벽 넷이 나온다.
+//
+// 손으로 세운 면도 같이 넣는다. 포털이 만드는 복도 바닥과 책상은 평면에서
+// 나오지 않지만, 방과 만나는 자리는 똑같이 기하로 풀린다 — 복도 바닥과 벽
+// 평면이 만나는 선이 곧 포털의 아래턱이고, 책상 옆면과 바닥 평면이 만나는
+// 선이 곧 책상 발자국이다. 사각형으로 자르는 덕에 아래턱은 저절로 구멍
+// 폭만큼만 열린다. 복도 바닥이 딱 그만큼 넓기 때문이다.
 //
 // 평면이 하나 더 들어오거나 모양이 다듬어지면 전부 다시 만든다. 기준점이
 // 바뀌어 법선 판정이 뒤집힐 수 있고, 사각형 중심도 함께 움직이기 때문이다.
@@ -124,6 +135,33 @@ export interface ShellSurface {
   flipped: boolean;
 }
 
+/**
+ * 모서리를 만들 때 함께 보는 면.
+ *
+ * 평면에서 나온 면은 사각형이 폴리곤의 바운딩 박스이고, 활동 범위는 거기서
+ * EDGE_MARGIN만큼 안쪽이다. 손으로 세운 면은 그런 게 없고 활동 범위가 곧
+ * 걸을 수 있는 전부라, 사각형을 그대로 쓰고 여유도 두지 않는다.
+ */
+interface Joinable extends JoinRect {
+  /** 모서리를 사각형 끝에서 이만큼 안으로 당긴다(m). */
+  margin: number;
+}
+
+/**
+ * 평면에서 나오지 않았지만 방과 이어져야 하는 면.
+ *
+ * 사각형을 활동 범위에서 읽지 않고 받아 적는다. 범위는 때에 따라 바뀌기
+ * 때문이다 — 복도 바닥은 바퀴가 나오기를 기다리는 동안 안쪽 깊숙이 좁혀져
+ * 있어서, 그때 읽으면 아래턱 선이 사각형 밖으로 떨어져 포털이 막힌다.
+ */
+export interface JoinRect {
+  surface: WalkSurface;
+  /** 걸을 수 있는 사각형(면의 로컬 XZ). 원점이 중심이 아닐 수 있다. */
+  halfX: number;
+  centerZ: number;
+  halfZ: number;
+}
+
 export interface RoomShell {
   /** 지금 살아 있는 면들. 평면이 사라지면 여기서도 빠진다. */
   surfaces: ShellSurface[];
@@ -141,6 +179,11 @@ export interface RoomShell {
     referenceSpace: XRReferenceSpace,
     insidePoint: THREE.Vector3,
   ): ShellSurface[];
+  /**
+   * 모서리를 다시 세운다. 손으로 세운 면이 움직였을 때 바깥에서 부른다 —
+   * 포털을 놓으면 복도 바닥과 책상이 그 자리로 옮겨 가기 때문이다.
+   */
+  rebuild(): void;
 }
 
 const planeMatrix = new THREE.Matrix4();
@@ -189,17 +232,22 @@ function clipAxis(origin: number, dir: number, half: number, span: Span): boolea
  * 교선은 그 평면 위에 있으므로 로컬 y는 0이다 — 보지 않는다.
  * 사각형을 JOIN_SLACK만큼 키워서 본다. 이유는 그 상수의 주석에 있다.
  */
-function clipToRect(halfX: number, halfZ: number, span: Span): boolean {
+function clipToRect(target: Joinable, span: Span): boolean {
   span.min = -Infinity;
   span.max = Infinity;
-  if (!clipAxis(localOrigin.x, localDir.x, halfX + JOIN_SLACK, span)) return false;
-  return clipAxis(localOrigin.z, localDir.z, halfZ + JOIN_SLACK, span);
+  if (!clipAxis(localOrigin.x, localDir.x, target.halfX + JOIN_SLACK, span)) return false;
+  return clipAxis(
+    localOrigin.z - target.centerZ,
+    localDir.z,
+    target.halfZ + JOIN_SLACK,
+    span,
+  );
 }
 
 /** 월드 교선을 이 면의 로컬로 옮긴다. 결과는 localOrigin/localDir에 남는다. */
-function localizeLine(shell: ShellSurface): void {
-  shell.surface.node.updateMatrixWorld();
-  inverseNode.copy(shell.surface.node.matrixWorld).invert();
+function localizeLine(surface: WalkSurface): void {
+  surface.node.updateMatrixWorld();
+  inverseNode.copy(surface.node.matrixWorld).invert();
   localOrigin.copy(linePoint).applyMatrix4(inverseNode);
   localDir.copy(lineDir).transformDirection(inverseNode);
 }
@@ -211,11 +259,11 @@ function localizeLine(shell: ShellSurface): void {
  * @param s1 끝
  */
 function edgeSpecFor(
-  shell: ShellSurface,
+  target: Joinable,
   s0: number,
   s1: number,
-): { nx: number; nz: number; at: number; alongCenter: number; halfWidth: number; band: number } | null {
-  localizeLine(shell);
+): Omit<SurfaceEdge, 'to'> | null {
+  localizeLine(target.surface);
 
   // SurfaceEdge는 모서리를 '바깥 법선 + 거리'로 적고, 그 모서리를 따라가는
   // 축을 (-nz, nx)로 둔다. 지금 우리가 든 건 방향이니, 거꾸로 풀어 법선을
@@ -228,18 +276,21 @@ function edgeSpecFor(
   nx /= length;
   nz /= length;
 
-  let at = localOrigin.x * nx + localOrigin.z * nz;
-  // 법선은 '바깥'을 향해야 한다. 면의 원점은 사각형 중심이므로, 중심에서
-  // 모서리로 가는 쪽이 바깥이다.
-  if (at < 0) {
+  // 법선은 '바깥'을 향해야 한다. 사각형 중심에서 모서리로 가는 쪽이 바깥이다.
+  // 원점이 아니라 중심으로 재는 게 중요하다 — 손으로 세운 면은 원점이 사각형
+  // 한쪽 끝에 있다. 복도 바닥의 원점은 아래턱 위에 있어서, 원점으로 재면
+  // 거리가 0이고 어느 쪽이 바깥인지 알 수가 없다.
+  const spread = localOrigin.x * nx + (localOrigin.z - target.centerZ) * nz;
+  if (spread < 0) {
     nx = -nx;
     nz = -nz;
-    at = -at;
   }
   // 모서리가 사각형 중심을 지난다 = 다른 평면이 이 면을 가로질러 썰고 있다.
-  // 상자 방에서는 나올 수 없는 모양이고, 그대로 쓰면 면 중앙을 넘는 순간
-  // 바퀴가 옆 면으로 튄다.
-  if (at < MIN_OFFSET) return null;
+  // 그대로 쓰면 면 한가운데를 지나는 순간 바퀴가 옆 면으로 튄다.
+  if (Math.abs(spread) < MIN_OFFSET) return null;
+
+  // at은 사각형 중심이 아니라 면의 원점 기준이다 — SurfaceEdge의 규약이 그렇다.
+  const at = localOrigin.x * nx + localOrigin.z * nz;
 
   const mid = (s0 + s1) / 2;
   const midX = localOrigin.x + localDir.x * mid;
@@ -250,7 +301,7 @@ function edgeSpecFor(
     nz,
     // 평면 끝이 아니라 활동 범위 끝에 둔다. 끝에 두면 범위가 먼저 막아서
     // 영영 못 넘는다. 손으로 세운 책상도 모서리와 범위를 같은 자리에 둔다.
-    at: Math.max(0, at - EDGE_MARGIN),
+    at: at - target.margin,
     alongCenter: -midX * nz + midZ * nx,
     halfWidth: (s1 - s0) / 2,
     band: CROSS_BAND,
@@ -290,7 +341,15 @@ function labelOf(plane: XRPlane): string {
   return plane.orientation === 'vertical' ? 'wall' : 'floor';
 }
 
-export function makeRoomShell(parent: THREE.Object3D): RoomShell {
+/**
+ * @param parent 면 노드를 달 곳
+ * @param extras 평면에서 나오지 않았지만 방과 이어져야 하는 면들. 포털이
+ *               만드는 복도 바닥과 책상이 여기 들어온다.
+ */
+export function makeRoomShell(
+  parent: THREE.Object3D,
+  extras: JoinRect[] = [],
+): RoomShell {
   const byPlane = new Map<XRPlane, ShellSurface>();
   /** 평면의 모양이 언제 갱신됐는지. Quest는 스캔하면서 폴리곤을 다듬는다. */
   const shapeTimes = new Map<XRPlane, DOMHighResTimeStamp>();
@@ -350,6 +409,9 @@ export function makeRoomShell(parent: THREE.Object3D): RoomShell {
     }
   }
 
+  /** 이 모듈이 만든 모서리. 다시 세울 때 이것만 걷어낸다. */
+  const madeEdges: { surface: WalkSurface; edge: SurfaceEdge }[] = [];
+
   /**
    * 두 면이 만나면 모서리로 잇는다. 이었으면 true.
    *
@@ -357,7 +419,7 @@ export function makeRoomShell(parent: THREE.Object3D): RoomShell {
    * 뒤 양쪽 사각형으로 잘라, 둘 다 실제로 닿는 구간만 모서리로 남긴다.
    * 마주 보는 벽처럼 교선이 어느 쪽 사각형에도 닿지 않으면 여기서 걸린다.
    */
-  function linkPair(a: ShellSurface, b: ShellSurface): boolean {
+  function linkPair(a: Joinable, b: Joinable): boolean {
     a.surface.node.updateMatrixWorld();
     b.surface.node.updateMatrixWorld();
 
@@ -384,10 +446,10 @@ export function makeRoomShell(parent: THREE.Object3D): RoomShell {
     // 길이와 무관하므로 순서는 이래야 한다.
     lineDir.normalize();
 
-    localizeLine(a);
-    if (!clipToRect(a.width / 2, a.depth / 2, spanA)) return false;
-    localizeLine(b);
-    if (!clipToRect(b.width / 2, b.depth / 2, spanB)) return false;
+    localizeLine(a.surface);
+    if (!clipToRect(a, spanA)) return false;
+    localizeLine(b.surface);
+    if (!clipToRect(b, spanB)) return false;
 
     const s0 = Math.max(spanA.min, spanB.min);
     const s1 = Math.min(spanA.max, spanB.max);
@@ -399,8 +461,27 @@ export function makeRoomShell(parent: THREE.Object3D): RoomShell {
     const specB = edgeSpecFor(b, s0, s1);
     if (specA === null || specB === null) return false;
 
-    linkSurfaces(a.surface, specA, b.surface, specB);
+    const [forward, backward] = linkSurfaces(a.surface, specA, b.surface, specB);
+    madeEdges.push({ surface: a.surface, edge: forward });
+    madeEdges.push({ surface: b.surface, edge: backward });
     return true;
+  }
+
+  /** 모서리를 만들 때 함께 볼 면들. 평면에서 나온 것 + 손으로 세운 것. */
+  function joinables(): Joinable[] {
+    const list: Joinable[] = [];
+    for (const shell of byPlane.values()) {
+      list.push({
+        surface: shell.surface,
+        halfX: shell.width / 2,
+        centerZ: 0,
+        halfZ: shell.depth / 2,
+        margin: EDGE_MARGIN,
+      });
+    }
+    // 손으로 세운 면은 사각형이 곧 걸을 수 있는 전부라 여유를 두지 않는다.
+    for (const extra of extras) list.push({ ...extra, margin: 0 });
+    return list;
   }
 
   /**
@@ -410,16 +491,21 @@ export function makeRoomShell(parent: THREE.Object3D): RoomShell {
    * 다른 면이 뒤집힐 수 있고, 모양이 다듬어지면 사각형 중심도 함께 움직인다.
    * 어느 모서리가 영향을 받는지 따지는 것보다 다시 세우는 쪽이 짧다.
    *
-   * 껍데기 면은 여기서 만든 모서리밖에 없으므로 통째로 비워도 안전하다.
+   * 배열을 비우지 않고 우리가 만든 것만 골라 뺀다. 손으로 세운 면에는 손으로
+   * 적은 모서리가 같은 배열에 들어 있다 — 책상 상판과 옆면이 그렇다.
    */
   function rebuildEdges(): number {
-    const shells = [...byPlane.values()];
-    for (const shell of shells) shell.surface.edges.length = 0;
+    for (const made of madeEdges) {
+      const at = made.surface.edges.indexOf(made.edge);
+      if (at >= 0) made.surface.edges.splice(at, 1);
+    }
+    madeEdges.length = 0;
 
+    const targets = joinables();
     let count = 0;
-    for (let i = 0; i < shells.length; i += 1) {
-      for (let j = i + 1; j < shells.length; j += 1) {
-        if (linkPair(shells[i], shells[j])) count += 1;
+    for (let i = 0; i < targets.length; i += 1) {
+      for (let j = i + 1; j < targets.length; j += 1) {
+        if (linkPair(targets[i], targets[j])) count += 1;
       }
     }
     return count;
@@ -434,9 +520,13 @@ export function makeRoomShell(parent: THREE.Object3D): RoomShell {
     shapeTimes.delete(plane);
   }
 
-  return {
+  const shell: RoomShell = {
     surfaces: [],
     edgeCount: 0,
+
+    rebuild() {
+      this.edgeCount = rebuildEdges();
+    },
 
     sync(frame, referenceSpace, insidePoint) {
       const detectedPlanes = frame.detectedPlanes;
@@ -520,4 +610,6 @@ export function makeRoomShell(parent: THREE.Object3D): RoomShell {
       return added;
     },
   };
+
+  return shell;
 }

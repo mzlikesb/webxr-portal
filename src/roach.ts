@@ -216,6 +216,14 @@ export interface Roach {
   /** 지금 향하고 있는 방향. 면을 넘길 때 그대로 넘겨준다. */
   getHeading(): number;
   /**
+   * 향하는 방향을 못박는다.
+   *
+   * 모서리를 넘을 때 방향은 저절로 정해진다. 포털에서 나오는 순간만 예외다 —
+   * 아래턱이 벽 한가운데에 있어서, 넘어갈 때 쓰는 '새 면 안쪽' 기준이 위쪽을
+   * 가리킨다. 나온 바퀴가 포털 위 벽을 기어오른다.
+   */
+  setHeading(newHeading: number): void;
+  /**
    * 이 로컬 z 너머는 '나가는 문'이라 경계 조향을 하지 않는다.
    * null이면 사방이 막힌 면이다.
    */
@@ -1226,6 +1234,9 @@ export function makeRoach(): Roach {
     placeOn,
     getHeading() {
       return heading;
+    },
+    setHeading(newHeading) {
+      heading = newHeading;
     },
     setExitZ(z) {
       exitZ = z;

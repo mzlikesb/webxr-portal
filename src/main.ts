@@ -20,7 +20,7 @@ import {
   orientSurface,
   transferIfCrossed,
 } from './walk-surface';
-import type { WalkSurface } from './walk-surface';
+import type { SurfaceEdge, WalkSurface } from './walk-surface';
 
 // ---------------------------------------------------------------------------
 // 1) 화면 밖으로 상태를 내보내는 두 경로
@@ -810,18 +810,9 @@ tableTop.boundHalfZ = TABLE_HALF_Z;
 const floorToSide = tableSides.map((side, i) => {
   const halfAlong = TABLE_SIDE_DIRS[i].nx !== 0 ? TABLE_HALF_Z : TABLE_HALF_X;
 
-  // 상판 ↔ 옆면: 상판의 그 변에서 만난다. 옆면 쪽은 로컬 -Z(위)가 상판이다.
-  linkSurfaces(
-    tableTop,
-    {
-      ...TABLE_SIDE_DIRS[i],
-      at: TABLE_SIDE_DIRS[i].nx !== 0 ? TABLE_HALF_X : TABLE_HALF_Z,
-      halfWidth: halfAlong,
-    },
-    side,
-    { nx: 0, nz: -1, at: 0, halfWidth: halfAlong },
-  );
-
+  // 상판 ↔ 옆면은 손으로 적지 않는다. 상판과 옆면은 직각으로 만나는 두 면이고,
+  // 방 껍데기가 쓰는 교선 계산이 그걸 그대로 풀어 준다 — 손으로 적으면 같은
+  // 모서리가 둘이 된다. 옆면끼리 만나는 책상 모서리도 거기서 공짜로 따라온다.
   side.boundHalfX = halfAlong;
   side.boundCenterZ = TABLE_HEIGHT / 2;
   side.boundHalfZ = TABLE_HEIGHT / 2;
@@ -954,6 +945,11 @@ function layOutSurfaces(): void {
     .set(sill.x, TABLE_HEIGHT, sill.z)
     .addScaledVector(portalNormal, TABLE_HALF_Z + 0.45);
   layOutTable(tablePoint, portalNormal);
+
+  // 복도 바닥과 책상이 방금 옮겨 갔다. 방과 만나는 자리도 다시 구한다.
+  roomShell.rebuild();
+  // 포털이 다른 벽으로 옮겨 갔을 수도 있다.
+  linkPortalToWall();
 }
 
 
@@ -989,7 +985,149 @@ const surfaceGrids = [
 // 면끼리 모서리로 잇는 건 다음 단계다. 지금은 면이 제자리에 서는지만 본다.
 // ---------------------------------------------------------------------------
 
-const roomShell = makeRoomShell(scene);
+// 손으로 세운 면들도 방과 이어지도록 함께 넘긴다. 사각형은 활동 범위에서
+// 읽지 않고 적어 준다 — 복도 바닥의 범위는 기다리는 동안 안쪽으로 좁아져
+// 있어서, 그때 읽으면 아래턱 선이 사각형 밖으로 떨어진다.
+//
+// 복도 바닥은 넣지 않는다. 벽 평면과 만나는 선이 아래턱인 건 맞지만, 그 선의
+// 어느 쪽이 구멍인지는 두 평면만 봐서는 알 수 없다. 자동 생성은 '사각형
+// 중심에서 먼 쪽이 바깥'으로 정하는데, 아래턱은 벽 한가운데에 있어서 그
+// 규칙이 아래쪽(막힌 벽)을 가리킨다. 실제로 그렇게 나왔고, 나온 바퀴가 그
+// 자리에서 곧장 복도로 되돌아가기를 1초에 한 번씩 반복했다.
+// 구멍이 아래턱 위에 있다는 건 포털만 아는 사실이라 아래에서 손으로 적는다.
+const roomShell = makeRoomShell(scene, [
+  { surface: tableTop, halfX: TABLE_HALF_X, centerZ: 0, halfZ: TABLE_HALF_Z },
+  ...tableSides.map((side, i) => ({
+    surface: side,
+    halfX: TABLE_SIDE_DIRS[i].nx !== 0 ? TABLE_HALF_Z : TABLE_HALF_X,
+    centerZ: TABLE_HEIGHT / 2,
+    halfZ: TABLE_HEIGHT / 2,
+  })),
+]);
+
+/** 포털이 걸린 진짜 벽. 못 찾았으면 null이고, 그때는 손으로 세운 벽면을 쓴다. */
+let portalWall: WalkSurface | null = null;
+/** 복도 ↔ 포털 벽 모서리. 포털을 다시 놓으면 걷어내고 새로 만든다. */
+let portalLink: { surface: WalkSurface; edge: SurfaceEdge }[] = [];
+
+const wallLocal = new THREE.Vector3();
+const portalUp = new THREE.Vector3();
+
+/** 포털이 어느 감지된 벽에 걸려 있는지. 아니면 null. */
+function findPortalWall(): ShellSurface | null {
+  let best: ShellSurface | null = null;
+  let bestGap = 0.08; // 벽에서 이보다 멀면 그 벽에 걸린 게 아니다(m)
+
+  for (const shell of roomShell.surfaces) {
+    shell.surface.node.updateMatrixWorld();
+    wallLocal.copy(portal.position);
+    shell.surface.node.worldToLocal(wallLocal);
+
+    const gap = Math.abs(wallLocal.y);
+    if (gap >= bestGap) continue;
+    // 평면에는 끝이 있다. 포털이 그 사각형 밖이면 다른 벽이다.
+    if (Math.abs(wallLocal.x) > shell.width / 2) continue;
+    if (Math.abs(wallLocal.z) > shell.depth / 2) continue;
+
+    bestGap = gap;
+    best = shell;
+  }
+  return best;
+}
+
+/**
+ * 복도를 포털이 걸린 진짜 벽에 잇고, 손으로 세운 벽면·방 바닥을 뺀다.
+ *
+ * 벽면과 방 바닥은 같은 자리를 두 번 적은 것이다 — 손으로 세운 벽면은 포털이
+ * 걸린 진짜 벽과 겹치고, 방 바닥은 진짜 바닥과 겹친다. 스캔한 적이 없는 방을
+ * 위한 대비일 뿐이라, 진짜가 들어오면 물러난다. 남겨 두면 복도에서 나가는
+ * 모서리가 둘이 되어 어느 벽으로 나가는지가 목록 순서에 달린다.
+ */
+function linkPortalToWall(): void {
+  const shell = findPortalWall();
+  if (shell === null) return;
+
+  // 전에 이어 둔 게 있으면 걷어낸다. 포털을 다시 놓으면 자리가 바뀐다.
+  for (const { surface, edge } of portalLink) {
+    const at = surface.edges.indexOf(edge);
+    if (at >= 0) surface.edges.splice(at, 1);
+  }
+  portalLink = [];
+
+  portalWall = shell.surface;
+  portalWall.node.updateMatrixWorld();
+
+  // 아래턱 위의 한 점과, 거기서 구멍 쪽으로 가는 방향을 벽의 로컬 2D로 옮긴다.
+  wallLocal.copy(corridorFloor.node.position);
+  portalWall.node.worldToLocal(wallLocal);
+  portalUp
+    .set(0, 1, 0)
+    .applyQuaternion(portal.quaternion)
+    .transformDirection(wallInverse.copy(portalWall.node.matrixWorld).invert());
+
+  const length = Math.hypot(portalUp.x, portalUp.z);
+  if (length < 1e-6) return;
+  const nx = portalUp.x / length;
+  const nz = portalUp.z / length;
+
+  const [corridorEdge, wallEdge] = linkSurfaces(
+    corridorFloor,
+    { nx: 0, nz: 1, at: 0 },
+    portalWall,
+    {
+      nx,
+      nz,
+      at: wallLocal.x * nx + wallLocal.z * nz,
+      alongCenter: -wallLocal.x * nz + wallLocal.z * nx,
+      // 구멍 폭만큼만 열려 있다. 그 밖은 막힌 벽이다.
+      halfWidth: PORTAL_WIDTH / 2,
+      // 아래턱을 위로 넘어서는 것 = 구멍 안으로 들어가는 것이다. 구멍 높이
+      // 만큼만 본다 — 띠가 없으면 구멍보다 한참 위를 기어가는 바퀴까지
+      // '넘어섰다'로 잡혀 허공에서 복도로 빨려 들어간다.
+      band: PORTAL_HEIGHT,
+    },
+  );
+  portalLink = [
+    { surface: corridorFloor, edge: corridorEdge },
+    { surface: portalWall, edge: wallEdge },
+  ];
+
+  const retired = new Set<WalkSurface>([wallFace, roomFloor]);
+  for (const surface of [corridorFloor, tableTop, ...tableSides]) {
+    surface.edges = surface.edges.filter((edge) => !retired.has(edge.to));
+  }
+  wallFace.edges = [];
+  roomFloor.edges = [];
+  log('감지된 벽·바닥으로 간다 — 손으로 세운 벽면·방 바닥은 뺐다');
+}
+
+const wallDown = new THREE.Vector3();
+const wallInverse = new THREE.Matrix4();
+
+/**
+ * 포털이 걸린 벽에 '아래로'라는 목적을 준다.
+ *
+ * 손으로 세운 벽면은 로컬 +Z가 아래를 향하도록 세워 두고 drift = 0을 줬다.
+ * 감지된 벽은 자세를 런타임이 정하므로 그 요령이 통하지 않는다. 월드의 아래
+ * 방향을 면 안으로 눕혀서 heading으로 적는다.
+ *
+ * 이게 없으면 바퀴가 포털에서 나와 3m × 2.4m 벽 위를 목적 없이 떠돈다.
+ * 실제로 그랬다 — 여덟 마리가 다 나왔는데 75초 동안 아무도 바닥에 못 닿았다.
+ *
+ * 매 프레임 다시 구한다. 면이 하나 더 들어오면 법선 판정이 뒤집힐 수 있고,
+ * 뒤집히면 로컬 '아래'도 함께 돌아간다.
+ *
+ * 올라온 바퀴까지 다시 내려보내지는 않는다. 모서리를 넘을 때, 들어온 방향이
+ * 그 면의 drift와 반대면 그 바퀴의 목적지는 지워지기 때문이다.
+ */
+function aimPortalWallDown(): void {
+  if (portalWall === null) return;
+  portalWall.node.updateMatrixWorld();
+  wallInverse.copy(portalWall.node.matrixWorld).invert();
+  wallDown.set(0, -1, 0).transformDirection(wallInverse);
+  portalWall.drift = Math.atan2(wallDown.x, wallDown.z);
+}
+
 
 /** [임시] 새로 생긴 껍데기 면에 격자를 깔아 눈으로 확인한다. */
 function addShellGrid(shell: ShellSurface): void {
@@ -1225,6 +1363,10 @@ renderer.setAnimationLoop((time, frame) => {
           ` · 면 ${roomShell.surfaces.length}개 모서리 ${roomShell.edgeCount}개`,
       );
     }
+    // 포털이 걸린 벽은 평면이 들어온 뒤에야 알 수 있다. 찾을 때까지 매 프레임
+    // 두드린다 — 찾으면 portalWall이 차고, 그 뒤로는 바로 빠져나온다.
+    if (portalWall === null) linkPortalToWall();
+    aimPortalWallDown();
   }
 
   // 아직 복도에 있고, 사람이 가까이서 포털 쪽을 보고 있으면 이제 나온다.
@@ -1287,6 +1429,14 @@ renderer.setAnimationLoop((time, frame) => {
         `${units.indexOf(unit)}번 ${SURFACE_NAMES.get(unit.surface)}` +
           ` → ${SURFACE_NAMES.get(next)}`,
       );
+      // 포털에서 막 나왔다. 아래턱은 벽 한가운데에 있어서, 모서리를 넘을 때
+      // 쓰는 '새 면 안쪽' 기준이 위쪽을 가리킨다 — 그대로 두면 나온 바퀴가
+      // 포털 위 벽을 기어오른다. 손으로 세운 벽면은 사각형이 통째로 아래에
+      // 있어서 이 문제가 없었다. 여기서는 방향을 못박는다.
+      if (unit.surface === corridorFloor && next === portalWall && next.drift !== null) {
+        unit.roach.setHeading(next.drift);
+        unit.roach.setDrift(next.drift);
+      }
       unit.surface = next;
     }
   }

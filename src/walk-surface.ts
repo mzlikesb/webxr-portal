@@ -164,6 +164,7 @@ export interface Walker {
     fromPose?: THREE.Quaternion,
   ): void;
   getHeading(): number;
+  setHeading(newHeading: number): void;
   setDrift(newHeading: number | null): void;
   setBounds(halfX: number, centerZ: number, halfZ: number, gapHalfWidth: number): void;
   setHugEdges(on: boolean): void;

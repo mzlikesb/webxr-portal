@@ -1217,9 +1217,12 @@ renderer.setAnimationLoop((time, frame) => {
   if (shellSpace !== null) {
     for (const shell of roomShell.sync(shellFrame, shellSpace, viewerPosition)) {
       addShellGrid(shell);
+      // [임시] 넘어간 기록을 읽을 수 있게 이름을 붙여 둔다.
+      SURFACE_NAMES.set(shell.surface, `${shell.label}${SURFACE_NAMES.size}`);
       log(
         `껍데기 면 ${shell.label} ${shell.width.toFixed(2)}×${shell.depth.toFixed(2)}m` +
-          `${shell.flipped ? ' (법선 뒤집음)' : ''} · 모두 ${roomShell.surfaces.length}개`,
+          `${shell.flipped ? ' (법선 뒤집음)' : ''}` +
+          ` · 면 ${roomShell.surfaces.length}개 모서리 ${roomShell.edgeCount}개`,
       );
     }
   }
@@ -1353,6 +1356,34 @@ Object.assign(window, {
         뒤집음: s.flipped,
       };
     }),
+  // [임시] 바퀴 하나를 껍데기 면 위에 올려놓는다. 모서리를 실제로 넘는지
+  // 보려고 둔 창구다 — 껍데기는 아직 손으로 세운 면들과 이어져 있지 않아서
+  // 걸어서 갈 길이 없다.
+  drop: (index = 0, which = 0, x = 0, z = 0, heading = Math.random() * Math.PI * 2) => {
+    const shell = roomShell.surfaces[index];
+    const unit = units[which];
+    if (shell === undefined || unit === undefined) return '그런 면/바퀴 없음';
+    unit.surface = shell.surface;
+    unit.roach.placeOn(shell.surface.node, x, z, heading);
+    applySurface(unit);
+    return SURFACE_NAMES.get(shell.surface);
+  },
+  // [임시] 껍데기 면들이 서로 어떻게 이어졌는지. 상자 방이면 벽-바닥 넷,
+  // 벽-천장 넷, 벽-벽 넷 = 열두 쌍이 나와야 한다.
+  edges: () =>
+    roomShell.surfaces.flatMap((s) =>
+      s.surface.edges.map((e) => ({
+        면: SURFACE_NAMES.get(s.surface) ?? '?',
+        이웃: SURFACE_NAMES.get(e.to) ?? '?',
+        법선: `${e.nx.toFixed(2)},${e.nz.toFixed(2)}`,
+        거리: +e.at.toFixed(3),
+        // nx는 정확히 0이 아니라 1e-17 같은 값으로 나온다. !== 0으로 가르면
+        // 수평 모서리에서 엉뚱한 축의 범위를 읽는다.
+        범위: +(Math.abs(e.nx) > 0.5 ? s.surface.boundHalfX : s.surface.boundHalfZ).toFixed(3),
+        반폭: +e.halfWidth.toFixed(2),
+        중심: +e.alongCenter.toFixed(2),
+      })),
+    ),
   // [임시] 책상 네 옆면의 원점 높이. 전부 책상 높이여야 한다.
   sides: () =>
     tableSides.map((side) => +side.node.getWorldPosition(new THREE.Vector3()).y.toFixed(3)),

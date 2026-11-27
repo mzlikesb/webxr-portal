@@ -136,6 +136,22 @@ const MIN_OVERLAP = 0.15;
 const MIN_OFFSET = 0.05;
 
 /**
+ * 모서리를 활동 범위보다 이만큼 바깥에 둔다(m).
+ *
+ * 둘을 같은 자리에 두었더니 구석에서 바퀴가 면 사이를 끝없이 오갔다.
+ * 가장자리를 따라가는 바퀴는 범위에서 EDGE_HUG(1.2cm)만큼 안쪽을 유지하는데,
+ * 그 간격을 맞추는 조향이 '범위 쪽으로 살짝' 틀어져 있다 — 넘어가는 판정이
+ * 보는 게 정확히 그 방향이다. 즉 붙어 다니는 내내 넘기 직전이고, 조향이
+ * 떨리는 폭이 그 간격과 같은 크기다.
+ *
+ * 모서리를 1cm 더 바깥에 두면 붙어 다니는 것만으로는 닿지 않는다. 마음먹고
+ * 넘을 때는 범위를 2cm 넘어설 때까지 밀어붙이므로(roach.ts의
+ * EDGE_CLIMB_DEPTH) 그대로 넘어간다. 정면으로 들이받아 지나치는 경우도 그보다
+ * 더 간다.
+ */
+const EDGE_OFFSET = 0.01;
+
+/**
  * 모서리 바깥의 '띠' 두께(m). 이 띠 안에서만 넘어간다.
  *
  * 모서리는 평면 끝에서 EDGE_MARGIN만큼 안쪽에 있고, 활동 범위도 거기까지다.
@@ -323,8 +339,8 @@ function edgeSpecFor(
   return {
     nx,
     nz,
-    // 평면 끝이 아니라 활동 범위 끝에 둔다. 끝에 두면 범위가 먼저 막아서
-    // 영영 못 넘는다. 손으로 세운 책상도 모서리와 범위를 같은 자리에 둔다.
+    // 활동 범위에서 EDGE_OFFSET만큼 바깥. 평면 끝에 두면 범위가 먼저 막아
+    // 영영 못 넘고, 범위와 같은 자리에 두면 붙어 다니다 저절로 넘는다.
     at: at - target.margin,
     alongCenter: -midX * nz + midZ * nx,
     halfWidth: (s1 - s0) / 2,
@@ -506,11 +522,13 @@ export function makeRoomShell(
         halfX: shell.width / 2,
         centerZ: 0,
         halfZ: shell.depth / 2,
-        margin: EDGE_MARGIN,
+        // 사각형은 평면 끝이고 범위는 거기서 EDGE_MARGIN 안쪽이다. 모서리는
+        // 그 범위보다 EDGE_OFFSET 바깥에 둔다.
+        margin: EDGE_MARGIN - EDGE_OFFSET,
       });
     }
-    // 손으로 세운 면은 사각형이 곧 걸을 수 있는 전부라 여유를 두지 않는다.
-    for (const extra of extras) list.push({ ...extra, margin: 0 });
+    // 손으로 세운 면은 사각형이 곧 활동 범위다. 모서리만 그만큼 바깥으로.
+    for (const extra of extras) list.push({ ...extra, margin: -EDGE_OFFSET });
     return list;
   }
 

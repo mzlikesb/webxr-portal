@@ -215,6 +215,8 @@ export interface Roach {
   ): void;
   /** 지금 향하고 있는 방향. 면을 넘길 때 그대로 넘겨준다. */
   getHeading(): number;
+  /** 지금 면에 올라선 뒤로 걸은 거리(m). placeOn에서 0으로 돌아간다. */
+  walkedSincePlaced(): number;
   /**
    * 향하는 방향을 못박는다.
    *
@@ -634,6 +636,8 @@ export function makeRoach(): Roach {
   let wallOnRight = 0;
   /** 가장자리를 넘어가려고 밀어붙이는 중인 남은 시간(초). 0이면 아니다. */
   let climbLeft = 0;
+  /** 이 면에 올라선 뒤로 걸은 거리(m). 모서리를 또 넘어도 되는지 가른다. */
+  let walkedHere = 0;
 
   let heading = Math.random() * Math.PI * 2;
   /** 지금 내고 있는 속도(m/s). */
@@ -935,6 +939,7 @@ export function makeRoach(): Roach {
 
     root.position.x += Math.sin(heading) * speed * dt;
     root.position.z += Math.cos(heading) * speed * dt;
+    walkedHere += speed * dt;
   }
 
   function senseThreat(dt: number, threat: THREE.Vector3 | null): void {
@@ -1179,6 +1184,7 @@ export function makeRoach(): Roach {
     // 넘어가려던 마음은 여기서 끝난다. 그대로 두면 새 면에서도 바깥을 향해
     // 밀어붙이는데, 그 '바깥'이란 방금 넘어온 모서리다 — 곧장 되돌아간다.
     climbLeft = 0;
+    walkedHere = 0;
 
     if (fromPose === undefined) {
       pivotLeft = 0;
@@ -1234,6 +1240,9 @@ export function makeRoach(): Roach {
     placeOn,
     getHeading() {
       return heading;
+    },
+    walkedSincePlaced() {
+      return walkedHere;
     },
     setHeading(newHeading) {
       heading = newHeading;

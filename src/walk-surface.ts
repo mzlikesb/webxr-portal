@@ -164,6 +164,7 @@ export interface Walker {
     fromPose?: THREE.Quaternion,
   ): void;
   getHeading(): number;
+  walkedSincePlaced(): number;
   setHeading(newHeading: number): void;
   setDrift(newHeading: number | null): void;
   setBounds(halfX: number, centerZ: number, halfZ: number, gapHalfWidth: number): void;
@@ -201,7 +202,24 @@ function applySurface(walker: Walker, surface: WalkSurface, drift: number | null
  * drift와 반대라면 지우는 편이 낫다. 벽을 타고 올라온 바퀴가 벽면의 '아래로'
  * 성향에 붙들려 곧장 다시 내려가는 핑퐁을 막기 위한 것이다.
  */
+/**
+ * 면에 올라선 뒤 이만큼은 걸어야 다음 모서리를 넘을 수 있다(m).
+ *
+ * 구석에서 바퀴가 면 사이를 무한히 오갔다. 헤드셋 로그에 한 마리가 3초 동안
+ * 벽 → 벽 → 천장 → 벽을 열 번 넘게 도는 게 찍혔다. 모서리를 넘으면 새 면의
+ * '경계 위'에 내려놓게 되는데, 거기는 되돌아가는 모서리의 바로 안쪽이기도
+ * 하다. 조향이 조금만 틀어지면 곧바로 되넘어간다.
+ *
+ * 되돌아가는 것만 막아서는 안 된다 — 위의 세 면 고리처럼 셋을 돌면 '직전
+ * 면'이 매번 다르다. 어느 쪽으로든 조금은 걸어야 다음을 넘을 수 있게 한다.
+ * 몸길이 두 배. 면을 가로질러 가는 바퀴는 한걸음에 넘기고, 경계에서 떨고
+ * 있는 바퀴만 걸린다.
+ */
+const SETTLE_WALK = 0.08;
+
 export function transferIfCrossed(walker: Walker, current: WalkSurface): WalkSurface {
+  if (walker.walkedSincePlaced() < SETTLE_WALK) return current;
+
   const position = walker.root.position;
 
   for (const edge of current.edges) {

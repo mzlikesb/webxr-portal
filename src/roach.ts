@@ -78,6 +78,32 @@ const EDGE_BAND = 0.035;
 /** 벽을 따라갈 때 유지하려는 간격(m). */
 const EDGE_HUG = 0.012;
 
+/**
+ * 가장자리를 따라가다 '넘어가 볼까' 하고 마음먹는 빈도(1/초).
+ *
+ * 주촉성만 두면 가장자리에 영영 붙어 있는다. 유지하는 간격이 EDGE_HUG인데
+ * 모서리는 활동 범위 끝에 있어서, 붙어 있는 한 넘어간 판정이 날 수가 없다.
+ * 미리보기에서 방 바닥의 네 변을 정면으로 들이받게 놓았더니 40초 동안 셋만
+ * 넘어갔고, 그것도 돌아서기 전에 지나친 덕이지 넘으려고 넘은 게 아니다.
+ * 그 상태로는 천장이나 건너편 벽에 사실상 못 간다.
+ *
+ * 4초에 한 번쯤. 더 잦으면 가장자리를 따라가는 맛이 없어지고, 더 뜸하면
+ * 보는 동안 한 번도 안 올라간다.
+ */
+const EDGE_CLIMB_RATE = 0.25;
+
+/** 넘어가기로 한 뒤 바깥을 향해 밀어붙이는 시간(초). */
+const EDGE_CLIMB_TIME = 0.8;
+
+/**
+ * 범위를 이만큼 넘어서도 그대로면 그만둔다(m).
+ *
+ * 넘어갈 모서리가 있으면 범위를 넘어서는 순간 다른 면으로 옮겨 간다. 아직도
+ * 여기 있다는 건 그 변이 막힌 벽이라는 뜻이다. 시간만으로 끊으면 그동안
+ * 30cm까지 밀고 나가서, 책상 상판이라면 허공으로 걸어 나간 꼴이 된다.
+ */
+const EDGE_CLIMB_DEPTH = 0.02;
+
 const IDENTITY = new THREE.Quaternion();
 
 // 바퀴벌레는 반드르르하다. 거친 재질로 두면 플라스틱 장난감처럼 보인다.
@@ -598,6 +624,8 @@ export function makeRoach(): Roach {
   let edgeSide = Math.random() < 0.5 ? 1 : -1;
   /** 지금 벽이 몸의 어느 쪽에 있는지. +면 오른쪽. 더듬이를 그쪽으로 뻗는다. */
   let wallOnRight = 0;
+  /** 가장자리를 넘어가려고 밀어붙이는 중인 남은 시간(초). 0이면 아니다. */
+  let climbLeft = 0;
 
   let heading = Math.random() * Math.PI * 2;
   /** 지금 내고 있는 속도(m/s). */
@@ -852,10 +880,24 @@ export function makeRoach(): Roach {
       // -Z 변에 구멍이 뚫려 있으면 그 폭 안에서는 변이 없다.
       if (Math.abs(root.position.x) > boundGap) consider(boundHalfZ + offsetZ, 0, -1);
 
+      // ── 가끔은 넘어간다 ──
+      //
+      // 가장자리를 따라가기만 하면 거기서 끝이다(EDGE_CLIMB_RATE 주석 참고).
+      // 그래서 가끔 마음을 먹고 바깥을 곧장 향해 잠깐 밀어붙인다. 그 자리에
+      // 모서리가 있으면 넘어가고, 막힌 벽이면 2cm쯤 들이받고 돌아선다 —
+      // 벌레가 벽을 더듬다 올라타려다 미끄러지는 것과 같은 모양이다.
+      const climbing = climbLeft > 0 && gap > -EDGE_CLIMB_DEPTH;
+      // 넘어설 만큼 넘어섰는데 아직 이 면이다 = 넘어갈 데가 없었다.
+      if (!climbing) climbLeft = 0;
+
       // 주촉성은 '머무르며 살피는' 면의 행동이고, 그런 면에서만 켠다.
       // 지나가는 면(복도 바닥, 벽면)에서 켜 두면 둘레만 돌다가 목적지에
       // 영영 닿지 않는다. 꺼 두면 경계는 '넘어가면 되돌리는' 선으로만 남는다.
-      if (hugEdges && gap < EDGE_BAND) {
+      if (climbing) {
+        climbLeft -= dt;
+        const want = Math.atan2(nx, nz);
+        heading += wrapAngle(want - heading) * Math.min(1, dt * 7);
+      } else if (hugEdges && gap < EDGE_BAND) {
         // 접선. edgeSide가 도는 방향을 정한다.
         const tx = -nz * edgeSide;
         const tz = nx * edgeSide;
@@ -869,6 +911,9 @@ export function makeRoach(): Roach {
 
         // 가끔 도는 방향을 바꾼다. 늘 같은 쪽으로만 돌면 궤도처럼 보인다.
         if (Math.random() < dt * 0.15) edgeSide = -edgeSide;
+
+        // 가끔은 돌지 말고 넘어가 본다.
+        if (Math.random() < dt * EDGE_CLIMB_RATE) climbLeft = EDGE_CLIMB_TIME;
       } else if (gap < 0) {
         // 변을 넘어갔다. 그 변의 안쪽으로 되돌린다.
         const home = Math.atan2(-nx, -nz);
@@ -1122,6 +1167,10 @@ export function makeRoach(): Roach {
 
     root.position.set(x, 0, z);
     heading = newHeading;
+
+    // 넘어가려던 마음은 여기서 끝난다. 그대로 두면 새 면에서도 바깥을 향해
+    // 밀어붙이는데, 그 '바깥'이란 방금 넘어온 모서리다 — 곧장 되돌아간다.
+    climbLeft = 0;
 
     if (fromPose === undefined) {
       pivotLeft = 0;

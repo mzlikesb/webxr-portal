@@ -11,8 +11,15 @@ import {
 import type { PortalCrossing } from './portal-crossing';
 import { makeInstanceBatch } from './instance-batch';
 import { makeHandTracker } from './hands';
+import type { TrackedHand } from './hands';
 import { makeDebugPanel } from './debug-panel';
-import { fakeHands, setFakeFingertip, updateFakeHands } from './fake-hands';
+import {
+  clearFakeHand,
+  fakeHands,
+  setFakeFingertip,
+  setFakeHand,
+  updateFakeHands,
+} from './fake-hands';
 import { fakeRoomFrame, fakeRoomSpace } from './fake-room';
 import { boundingRect, makeRoomShell } from './room-shell';
 import type { JoinRect, ShellSurface } from './room-shell';
@@ -1518,13 +1525,20 @@ function planeSummary(): string[] {
 
 /** 손가락 끝이 이 거리 안으로 들어오면 건드린 것으로 친다(m). */
 const TOUCH_RADIUS = 0.05;
+/**
+ * 손바닥이 면을 이만큼 마주 봐야 때린 것으로 친다(법선 내적).
+ *
+ * 0.5면 60°쯤. 손날로 치거나 비스듬히 스치는 것까지 받아 주면 다시 헐거워진다.
+ */
+const SMASH_FACING = 0.5;
+
 /** 면에서 이만큼 떨어진 손가락은 아직 닿지 않은 것이다(m). */
 const TOUCH_HEIGHT = 0.07;
 
 /** 최근 최고 속력이 이보다 빨랐어야 내려친 것으로 친다(m/s). */
-const SMASH_SPEED = 0.9;
+const SMASH_SPEED = 1.4;
 /** 내려칠 때 손바닥이 면에서 이 거리 안이어야 한다(m). */
-const SMASH_HEIGHT = 0.13;
+const SMASH_HEIGHT = 0.05;
 /** 손바닥에 깔리는 범위(m). */
 const SMASH_RADIUS = 0.09;
 
@@ -1532,11 +1546,12 @@ const tipLocal = new THREE.Vector3();
 const palmLocal = new THREE.Vector3();
 const palmVelocityLocal = new THREE.Vector3();
 const surfaceQuat = new THREE.Quaternion();
+const surfaceNormal = new THREE.Vector3();
 let handsSeen = false;
 
 /** 손가락 끝에 닿은 바퀴를 놀래킨다. */
-function applyTouches(): void {
-  for (const hand of handTracker.hands) {
+function applyTouches(hands: TrackedHand[]): void {
+  for (const hand of hands) {
     if (!hand.tracked) continue;
 
     if (!handsSeen) {
@@ -1570,8 +1585,8 @@ function applyTouches(): void {
  * 걸리고, 거리만 보면 천천히 손을 짚어도 죽는다. 면의 법선 방향 속도를 보므로
  * 벽이든 바닥이든 책상이든 같은 코드로 판정된다.
  */
-function applySmashes(): void {
-  for (const hand of handTracker.hands) {
+function applySmashes(hands: TrackedHand[]): void {
+  for (const hand of hands) {
     if (!hand.tracked) continue;
 
     // 손바닥 하나가 아니라 손 전체로 친다.
@@ -1593,16 +1608,33 @@ function applySmashes(): void {
         if (Math.abs(palmLocal.y) > SMASH_HEIGHT) continue;
         if (distance > SMASH_RADIUS) continue;
 
+        // ── 손바닥이 면을 마주 봐야 한다 ──
+        //
+        // 접촉은 손바닥과 손가락 끝 여섯 점을 다 본다. 사람은 벌레를 손가락
+        // 쪽으로 겨냥해 때리니까 그래야 맞는다. 그런데 그 여섯 점만 보면
+        // 손가락 하나를 갖다 대는 것도 때린 것이 된다 — 헤드셋에서 실제로
+        // 그렇게 죽었다.
+        //
+        // 때리는 것과 찌르는 것의 차이는 손의 자세다. 내려칠 때 손바닥은 면을
+        // 마주 보고, 손가락으로 가리킬 때는 아니다. 손바닥 법선을 이미 읽고
+        // 있으니(디버그 패널이 쓴다) 그걸로 가른다.
+        node.getWorldQuaternion(surfaceQuat);
+        surfaceNormal.set(0, 1, 0).applyQuaternion(surfaceQuat);
+        const facing = hand.palmNormal.dot(surfaceNormal);
+        if (facing > -SMASH_FACING) continue;
+
         // 속도는 방향만 바꾼다 — 위치처럼 원점을 빼면 안 된다.
-        palmVelocityLocal
-          .copy(hand.palmVelocity)
-          .applyQuaternion(node.getWorldQuaternion(surfaceQuat).invert());
+        palmVelocityLocal.copy(hand.palmVelocity).applyQuaternion(surfaceQuat.invert());
         // 지금은 '면 쪽으로 가고 있다'만 본다. 세기는 최근 최고 속력으로 가른다.
         if (palmVelocityLocal.y > 0) continue;
         if (hand.peakSpeed < SMASH_SPEED) continue;
 
         unit.roach.squash();
-        log(`${units.indexOf(unit)}번 짜부러짐`);
+        // [임시] 어떤 값에서 죽었는지. 기기에서 세기를 다시 맞출 때 쓴다.
+        log(
+          `${units.indexOf(unit)}번 짜부러짐` +
+            ` (속력 ${hand.peakSpeed.toFixed(2)} · 마주봄 ${(-facing).toFixed(2)})`,
+        );
       }
     }
   }
@@ -1707,24 +1739,24 @@ renderer.setAnimationLoop((time, frame) => {
 
   if (frame !== undefined) {
     const handSpace = renderer.xr.getReferenceSpace();
-    if (handSpace !== null) {
-      handTracker.update(frame, handSpace, dt);
-      applyTouches();
-      applySmashes();
-    }
+    if (handSpace !== null) handTracker.update(frame, handSpace, dt);
   }
 
-  // ── 손바닥 디버그 패널 ──
+  // ── 손 ──
   //
-  // 세션 밖에서는 가짜 손을 먹인다. 손 추적은 XR에만 와서, 이게 없으면 패널
-  // 코드가 데스크톱에서 한 줄도 안 돈다 — 맞는지 틀렸는지 알 수가 없다.
-  // 가짜 방 평면과 같은 발판이다.
-  let panelHands = handTracker.hands;
-  if (frame === undefined) {
+  // 세션 밖에서는 가짜 손을 먹인다. 손 추적은 XR에만 와서, 이게 없으면 손을
+  // 쓰는 코드가 데스크톱에서 한 줄도 안 돈다 — 패널도, 건드리기도, 때리기도.
+  // 때리기는 '얼마나 빨라야 때린 것인가'를 가르는 코드라 더더욱 돌려 봐야
+  // 한다. 가짜 방 평면과 같은 발판이고, 같은 규칙으로 켠다.
+  let hands = handTracker.hands;
+  if (frame === undefined && useFakeRoom) {
     viewer.getWorldQuaternion(viewerQuaternion);
     updateFakeHands(viewerPosition, viewerQuaternion);
-    panelHands = fakeHands;
+    hands = fakeHands;
   }
+
+  applyTouches(hands);
+  applySmashes(hands);
 
   if (dt > 0) fps += (1 / dt - fps) * Math.min(1, dt * 3);
 
@@ -1743,7 +1775,7 @@ renderer.setAnimationLoop((time, frame) => {
           ...planeSummary(),
         ]);
       }
-      debugPanel.update(panelHands, viewerPosition);
+      debugPanel.update(hands, viewerPosition);
     } catch (error) {
       panelFailed = true;
       debugPanel.group.visible = false;
@@ -1861,6 +1893,35 @@ renderer.setAnimationLoop((time, frame) => {
 // [임시] 미리보기에서 바퀴가 범위 안에 있는지 콘솔로 확인하려고 둔 창구.
 // 합치기 전에 지운다.
 Object.assign(window, {
+  // [임시] 때리기를 미리보기에서 시험하는 창구. 세기를 가르는 값은 머리로
+  // 맞출 수 없어서, 실제로 돌려 보고 정한다.
+  //   slap(0, 2, true)   손바닥을 면으로 향한 채 빠르게  → 죽어야 한다
+  //   slap(0, 0.2, true) 천천히 갖다 대기               → 살아야 한다
+  //   slap(0, 2, false)  빠르지만 손바닥이 딴 데        → 살아야 한다
+  slap: (which = 0, speed = 2, facing = true) => {
+    const unit = units[which];
+    if (unit === undefined) return '그런 바퀴 없음';
+
+    const node = unit.surface.node;
+    node.updateMatrixWorld();
+    const quat = node.getWorldQuaternion(new THREE.Quaternion());
+    const normal = new THREE.Vector3(0, 1, 0).applyQuaternion(quat);
+    const point = unit.roach.root.position.clone();
+    node.localToWorld(point);
+    point.addScaledVector(normal, 0.02);
+
+    // 마주 보지 않는 경우는 면의 로컬 X축으로 둔다 — 법선과 늘 직각이다.
+    const palmNormal = facing
+      ? normal.clone().negate()
+      : new THREE.Vector3(1, 0, 0).applyQuaternion(quat);
+    setFakeHand('right', point, palmNormal, normal.clone().multiplyScalar(-speed), speed);
+    return SURFACE_NAMES.get(unit.surface) ?? '?';
+  },
+  unslap: () => {
+    clearFakeHand();
+    return units.map((u) => u.roach.isSquashed());
+  },
+  squashed: () => units.map((u) => u.roach.isSquashed()),
   // [임시] 손바닥 패널의 버튼을 눌러 보는 창구. 미리보기에는 진짜 손가락이
   // 없어서, 패널 로컬 좌표(미터)를 받아 가짜 검지를 거기 갖다 댄다.
   poke: (index = 0) => {

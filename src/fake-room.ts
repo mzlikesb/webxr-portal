@@ -174,5 +174,20 @@ export const fakeRoomFrame = {
   getPose: (space: object) => poseBySpace.get(space) ?? null,
 } as unknown as XRFrame;
 
+/**
+ * [시험용] 평면 목록을 잠깐 비운다.
+ *
+ * 런타임이 detectedPlanes를 한 프레임 통째로 비우는 일이 실제로 있었다.
+ * 헤드셋 로그에 '평면 0개'가 찍히고 면 여섯 개가 전부 버려졌다. 그걸 견디는
+ * 코드를 짰으면 그 일이 데스크톱에서도 일어나야 한다.
+ */
+export function blinkFakeRoom(ms: number): void {
+  const kept = [...planeSet];
+  planeSet.clear();
+  window.setTimeout(() => {
+    for (const plane of kept) planeSet.add(plane);
+  }, ms);
+}
+
 /** getPose에 넘길 가짜 기준 공간. 가짜 getPose는 이걸 보지 않는다. */
 export const fakeRoomSpace = {} as unknown as XRReferenceSpace;

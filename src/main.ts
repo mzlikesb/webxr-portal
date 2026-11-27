@@ -20,7 +20,7 @@ import {
   setFakeHand,
   updateFakeHands,
 } from './fake-hands';
-import { fakeRoomFrame, fakeRoomSpace } from './fake-room';
+import { blinkFakeRoom, fakeRoomFrame, fakeRoomSpace } from './fake-room';
 import { boundingRect, makeRoomShell } from './room-shell';
 import type { JoinRect, ShellSurface } from './room-shell';
 import {
@@ -147,6 +147,17 @@ function applyPlaneVisibility(): void {
 /** 평면의 모양이 언제 갱신됐는지. Quest는 스캔을 하면서 폴리곤을 계속 다듬는다. */
 const planeShapeTimes = new Map<XRPlane, DOMHighResTimeStamp>();
 
+/**
+ * 평면이 마지막으로 목록에 있던 시각.
+ *
+ * 런타임이 detectedPlanes를 한 프레임 비우는 일이 있다. 그때마다 오버레이를
+ * 전부 버리고 다시 만들면 화면이 깜빡이고, 책상을 올려 둔 가구 평면도 한
+ * 프레임 사라졌다 돌아온다 — 그 사이 책상이 포털 앞 가짜 자리로 튀었다 온다.
+ * 방 껍데기와 같은 유예를 둔다.
+ */
+const planeLastSeen = new Map<XRPlane, number>();
+const PLANE_VANISH_GRACE = 500;
+
 const planeMatrix = new THREE.Matrix4();
 
 function buildPlaneGeometry(plane: XRPlane): THREE.BufferGeometry {
@@ -207,6 +218,7 @@ function disposePlane(plane: XRPlane): void {
 
   planeMeshes.delete(plane);
   planeShapeTimes.delete(plane);
+  planeLastSeen.delete(plane);
 }
 
 let lastPlaneSummary = '';
@@ -216,9 +228,16 @@ function updatePlanes(frame: XRFrame, referenceSpace: XRReferenceSpace): void {
   // plane-detection이 안 켜진 세션에서는 아예 undefined다.
   if (detectedPlanes === undefined) return;
 
-  // 런타임이 더 이상 추적하지 않는 평면 치우기.
-  for (const plane of planeMeshes.keys()) {
-    if (detectedPlanes.has(plane) === false) disposePlane(plane);
+  // 런타임이 더 이상 추적하지 않는 평면 치우기. 한 프레임 안 보이는 것과
+  // 정말 없어진 것은 기다려 보면 갈린다(planeLastSeen 주석 참고).
+  const now = performance.now();
+  for (const plane of [...planeMeshes.keys()]) {
+    if (detectedPlanes.has(plane)) {
+      planeLastSeen.set(plane, now);
+      continue;
+    }
+    if (now - (planeLastSeen.get(plane) ?? now) < PLANE_VANISH_GRACE) continue;
+    disposePlane(plane);
   }
 
   for (const plane of detectedPlanes) {
@@ -1235,6 +1254,41 @@ const tableRects: JoinRect[] = [
 
 const roomShell = makeRoomShell(scene, tableRects);
 
+/**
+ * 딛고 있던 면이 사라진 바퀴를 바닥으로 옮긴다.
+ *
+ * 면을 버리면 그 노드가 씬에서 떨어져 나간다. 그 위에 서 있던 바퀴는 노드에
+ * 매달린 채 함께 딸려 나가 화면에서 그냥 사라지고, 다시는 돌아오지 않는다 —
+ * 가리키는 면이 이미 씬 밖이라 모서리를 넘을 수도 없다.
+ *
+ * 살아 있는 바닥으로 내려놓는다. 갑자기 자리가 바뀌는 건 어쩔 수 없지만,
+ * 사라지는 것보다는 낫다.
+ *
+ * 바닥까지 함께 사라졌으면 복도로 보낸다. 손으로 세운 방 바닥은 감지된 방을
+ * 쓰기 시작할 때 그래프에서 빠져서 모서리가 하나도 없다 — 거기 내려놓으면
+ * 보이기는 해도 영영 갇힌다. 복도는 늘 살아 있고 늘 이어져 있다. 포털로
+ * 도로 들어간 것으로 보이고, 조금 뒤 다시 나온다.
+ */
+function rescueFrom(gone: ShellSurface[]): void {
+  const lost = new Set(gone.map((shell) => shell.surface));
+
+  for (const unit of units) {
+    if (!lost.has(unit.surface)) continue;
+
+    const floor = roomShell.surfaces.find((shell) => shell.label === 'floor');
+    const landing = floor?.surface ?? corridorFloor;
+    unit.surface = landing;
+    unit.roach.placeOn(
+      landing.node,
+      0,
+      landing.boundCenterZ,
+      Math.random() * Math.PI * 2,
+    );
+    applySurface(unit);
+    log(`${units.indexOf(unit)}번 딛던 면이 사라져 바닥으로 옮김`);
+  }
+}
+
 /** 포털이 걸린 진짜 벽. 못 찾았으면 null이고, 그때는 손으로 세운 벽면을 쓴다. */
 let portalWall: WalkSurface | null = null;
 /** 복도 ↔ 포털 벽 모서리. 포털을 다시 놓으면 걷어내고 새로 만든다. */
@@ -1704,6 +1758,7 @@ renderer.setAnimationLoop((time, frame) => {
   if (shellSpace !== null) updatePlanes(shellFrame, shellSpace);
   if (shellSpace !== null) {
     const newShells = roomShell.sync(shellFrame, shellSpace, viewerPosition);
+    if (roomShell.removed.length > 0) rescueFrom(roomShell.removed);
     // 평면이 늘었다. 포털이 걸린 벽이 이제야 들어왔을 수 있다.
     //
     // 'portalWall이 아직 null이면'으로 두면 안 된다 — 스캔한 적 없는 방에서는
@@ -1893,6 +1948,11 @@ renderer.setAnimationLoop((time, frame) => {
 // [임시] 미리보기에서 바퀴가 범위 안에 있는지 콘솔로 확인하려고 둔 창구.
 // 합치기 전에 지운다.
 Object.assign(window, {
+  // [임시] 평면이 한 프레임 사라지는 일을 흉내 내는 창구.
+  blink: (ms = 100) => {
+    blinkFakeRoom(ms);
+    return `${ms}ms 동안 평면 목록을 비운다`;
+  },
   // [임시] 때리기를 미리보기에서 시험하는 창구. 세기를 가르는 값은 머리로
   // 맞출 수 없어서, 실제로 돌려 보고 정한다.
   //   slap(0, 2, true)   손바닥을 면으로 향한 채 빠르게  → 죽어야 한다

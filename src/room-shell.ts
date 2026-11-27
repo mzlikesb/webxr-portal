@@ -96,6 +96,19 @@ const EDGE_MARGIN = 0.02;
 const SURFACE_LIFT = 0.002;
 
 /**
+ * 평면이 목록에서 사라져도 이만큼은 기다린다(ms).
+ *
+ * 런타임이 detectedPlanes를 한 프레임 통째로 비우는 일이 있다. 헤드셋 로그에
+ * '평면 0개'가 두 번 찍혔고, 그때마다 면 여섯 개가 전부 버려졌다가 다시
+ * 만들어졌다. 면을 버리면 그 노드가 씬에서 떨어져 나가고, 그 위에 서 있던
+ * 바퀴도 함께 딸려 나간다 — 화면에서 그냥 사라지는 것이다.
+ *
+ * 한 프레임 안 보이는 것과 정말 없어진 것은 기다려 보면 갈린다. 0.5초면
+ * 딸꾹질은 다 넘기고, 진짜로 치운 평면도 금방 정리된다.
+ */
+const VANISH_GRACE = 500;
+
+/**
  * 두 법선의 외적 길이가 이보다 짧으면 모서리를 만들지 않는다.
  *
  * 외적의 길이는 두 법선이 이루는 각의 sin이다. 0.1이면 6° 안쪽 — 마주 보는
@@ -176,6 +189,8 @@ export interface RoomShell {
   surfaces: ShellSurface[];
   /** 껍데기 면끼리 이어진 모서리 수. 로그용. */
   edgeCount: number;
+  /** 이번 프레임에 사라진 면들. 그 위에 있던 바퀴를 구해야 한다. */
+  removed: ShellSurface[];
   /**
    * 매 프레임. 새 평면에는 면을 만들고, 사라진 평면의 면은 치우고,
    * 남은 면들의 자세를 갱신한다.
@@ -362,6 +377,8 @@ export function makeRoomShell(
   const byPlane = new Map<XRPlane, ShellSurface>();
   /** 평면의 모양이 언제 갱신됐는지. Quest는 스캔하면서 폴리곤을 다듬는다. */
   const shapeTimes = new Map<XRPlane, DOMHighResTimeStamp>();
+  /** 평면이 마지막으로 목록에 있던 시각. VANISH_GRACE 참고. */
+  const lastSeen = new Map<XRPlane, number>();
 
   /** 사각형을 면의 자세와 범위에 반영한다. 모양이 다듬어지면 다시 부른다. */
   function applyRect(shell: ShellSurface): void {
@@ -531,11 +548,13 @@ export function makeRoomShell(
     shell.pose.removeFromParent();
     byPlane.delete(plane);
     shapeTimes.delete(plane);
+    lastSeen.delete(plane);
   }
 
   const shell: RoomShell = {
     surfaces: [],
     edgeCount: 0,
+    removed: [],
 
     rebuild() {
       this.edgeCount = rebuildEdges();
@@ -554,8 +573,19 @@ export function makeRoomShell(
        */
       let reshaped = false;
 
+      const now = performance.now();
+      this.removed.length = 0;
+
       for (const plane of [...byPlane.keys()]) {
-        if (detectedPlanes.has(plane)) continue;
+        if (detectedPlanes.has(plane)) {
+          lastSeen.set(plane, now);
+          continue;
+        }
+        // 아직 기다려 본다. 위 상수의 주석 참고.
+        if (now - (lastSeen.get(plane) ?? now) < VANISH_GRACE) continue;
+
+        const gone = byPlane.get(plane);
+        if (gone !== undefined) this.removed.push(gone);
         dispose(plane);
         reshaped = true;
       }

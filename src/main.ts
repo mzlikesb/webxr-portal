@@ -308,8 +308,17 @@ function reportPlanes(detectedPlanes: XRPlaneSet): void {
 //    둔다. 벽이 안 잡히면 눈앞 1.5m에 세운다(평면 감지가 아예 안 되는 기기의
 //    대체 경로도 겸한다). 트리거를 당기면 그 자리에 확정된다.
 // ---------------------------------------------------------------------------
-const PORTAL_WIDTH = 0.6;
-const PORTAL_HEIGHT = 0.95;
+/**
+ * 파이프 구경(m).
+ *
+ * 사각형 포털이었다. 벽에 네모난 구멍이 뚫리고 거기서 바퀴가 나오는 건
+ * 설명이 안 됐다 — 바퀴가 나오는 데는 파이프다. 틈으로 할까 했지만 틈은
+ * 얇아서 너머의 깊이가 안 보이고, 그 깊이가 이 작품의 스텐실이 하는 일
+ * 전부다. 파이프는 입이 작으면서 안쪽으로 깊다.
+ *
+ * 바퀴가 4cm다. 14cm면 한 마리가 넉넉히 지나고, 여러 마리면 줄을 선다.
+ */
+const PIPE_BORE = 0.14;
 /** 벽을 못 찾았을 때 포털을 띄울 거리. */
 const PORTAL_FALLBACK_DISTANCE = 1.5;
 
@@ -326,15 +335,19 @@ const portalEdgeMaterial = new THREE.LineBasicMaterial({
 const portal = new THREE.Group();
 scene.add(portal);
 
-// PlaneGeometry는 X-Y에 서서 +Z를 향한다. orientPortal이 이 그룹의 로컬 +Z를
+// CircleGeometry는 X-Y에 누워 +Z를 향한다. orientPortal이 이 그룹의 로컬 +Z를
 // 벽의 법선에 맞추므로, 지오메트리를 따로 돌릴 필요가 없다.
-const portalShape = new THREE.PlaneGeometry(PORTAL_WIDTH, PORTAL_HEIGHT);
+//
+// 미리보기·테두리·스텐실 마스크가 전부 이 하나를 쓴다. EdgesGeometry는 면이
+// 같은 평면이면 안쪽 변을 버리므로, 원판에서 바깥 테두리만 남는다 — 파이프
+// 입구의 링이 공짜로 나온다.
+const portalShape = new THREE.CircleGeometry(PIPE_BORE / 2, 32);
 
-/** 확정 전에 보여 주는 반투명 사각형. 확정되면 숨기고 진짜 포털로 바꾼다. */
+/** 확정 전에 보여 주는 반투명 원판. 확정되면 숨기고 진짜 구멍으로 바꾼다. */
 const portalPreview = new THREE.Mesh(portalShape, portalSurfaceMaterial);
 portal.add(portalPreview);
 
-/** 테두리. 포털이 뚫린 뒤에도 남아서 '액자'가 된다. */
+/** 테두리. 구멍이 뚫린 뒤에도 남아서 파이프 입구의 링이 된다. */
 portal.add(new THREE.LineSegments(new THREE.EdgesGeometry(portalShape), portalEdgeMaterial));
 
 const raycaster = new THREE.Raycaster();
@@ -544,9 +557,9 @@ function resetPortal(): void {
 //    DEPTH24_STENCIL8로 잡힌다.
 // ---------------------------------------------------------------------------
 const PORTAL_STENCIL_REF = 1;
-const PORTAL_DEPTH = 9; // 너머 공간의 깊이(m)
+const PIPE_DEPTH = 2.5; // 파이프의 길이(m). 끝은 어둠에 묻힌다
 
-/** 1단계: 스텐실에 표시만 하는 사각형. */
+/** 1단계: 스텐실에 표시만 하는 원판. */
 const portalMask = new THREE.Mesh(
   portalShape,
   new THREE.MeshBasicMaterial({
@@ -592,7 +605,7 @@ function registerFadeMaterial(material: THREE.Material): void {
 
 registerFadeMaterial(portalEdgeMaterial);
 
-function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
+function clipToPortal(object: THREE.Mesh | THREE.Line): void {
   const material = object.material as THREE.Material;
   material.stencilWrite = true;
   material.stencilRef = PORTAL_STENCIL_REF;
@@ -601,55 +614,71 @@ function clipToPortal(object: THREE.Mesh | THREE.LineSegments): void {
 }
 
 {
-  // 복도. BackSide라서 안쪽 면만 그려진다 — 상자 안에 들어와 있는 셈이다.
-  // 포털 구멍보다 살짝 크게 만들어서, 비스듬히 보면 측벽이 원근으로 모여
-  // 깊이가 읽히게 한다.
-  const corridor = new THREE.Mesh(
-    new THREE.BoxGeometry(PORTAL_WIDTH + 0.2, PORTAL_HEIGHT + 0.3, PORTAL_DEPTH),
+  // 관. BackSide라서 안쪽 면만 그려진다 — 파이프 속에 들어와 있는 셈이다.
+  //
+  // CylinderGeometry의 축은 Y다. X로 90° 눕히면 +Y가 +Z로 가므로 축이 벽
+  // 안쪽을 향한다. 구경을 그대로 쓰면 바닥이 정확히 -PIPE_BORE/2, 즉 구멍의
+  // 아래턱과 같은 높이다 — 바퀴가 안쪽 턱을 기어오르지 않고 그냥 걸어 나온다.
+  const tube = new THREE.Mesh(
+    new THREE.CylinderGeometry(PIPE_BORE / 2, PIPE_BORE / 2, PIPE_DEPTH, 24, 1, true),
     new THREE.MeshStandardMaterial({
-      color: 0x2a3b4d,
-      roughness: 0.95,
+      // 배수관이다. 파랗고 환한 '너머 공간'이 아니라 때 낀 어둠이어야 한다.
+      color: 0x15181c,
+      roughness: 1,
       side: THREE.BackSide,
       // 페이드를 위해 처음부터 transparent로 둔다. 런타임에 이 값을 바꾸면
       // 셰이더가 다시 컴파일돼서 그 프레임이 튄다.
       transparent: true,
     }),
   );
-  registerFadeMaterial(corridor.material as THREE.Material);
-  corridor.position.z = -PORTAL_DEPTH / 2;
-  // 복도 바닥을 구멍 아래턱과 같은 높이로 올린다. 그래야 바퀴가 안쪽 턱을
-  // 기어오르지 않고 그냥 걸어 나온다. 상자는 구멍보다 0.3 높으므로 절반만큼
-  // 올리면 바닥이 -PORTAL_HEIGHT/2에 맞는다.
-  corridor.position.y = 0.15;
-  clipToPortal(corridor);
-  portalWorld.add(corridor);
+  registerFadeMaterial(tube.material as THREE.Material);
+  tube.rotation.x = Math.PI / 2;
+  tube.position.z = -PIPE_DEPTH / 2;
+  clipToPortal(tube);
+  portalWorld.add(tube);
 
-  // 일정 간격의 테두리. 같은 크기의 사각형이 작아지며 멀어지는 게
-  // 사람 눈에 가장 잘 먹는 깊이 단서다.
-  const ribShape = new THREE.PlaneGeometry(PORTAL_WIDTH + 0.18, PORTAL_HEIGHT + 0.28);
-  const ribEdges = new THREE.EdgesGeometry(ribShape);
+  // 일정 간격의 링. 같은 크기의 원이 작아지며 멀어지는 게 사람 눈에 가장 잘
+  // 먹는 깊이 단서다. 관 안쪽이라 사각형이 아니라 원이어야 한다.
+  const ribPoints: THREE.Vector3[] = [];
+  const ribRadius = (PIPE_BORE / 2) * 0.96;
+  for (let i = 0; i <= 24; i += 1) {
+    const angle = (i / 24) * Math.PI * 2;
+    ribPoints.push(new THREE.Vector3(Math.cos(angle) * ribRadius, Math.sin(angle) * ribRadius, 0));
+  }
+  const ribShape = new THREE.BufferGeometry().setFromPoints(ribPoints);
 
   for (let i = 1; i <= 5; i += 1) {
-    const rib = new THREE.LineSegments(
-      ribEdges,
+    const rib = new THREE.Line(
+      ribShape,
       new THREE.LineBasicMaterial({
-        color: 0x88ccff,
+        color: 0x6e8aa0,
         transparent: true,
         // 멀수록 흐리게. 거리감을 한 번 더 준다.
-        opacity: 0.9 - i * 0.15,
+        opacity: 0.55 - i * 0.09,
       }),
     );
-    rib.position.z = -i * 1.4;
+    rib.position.z = -i * (PIPE_DEPTH / 6);
     clipToPortal(rib);
     portalWorld.add(rib);
     registerFadeMaterial(rib.material as THREE.Material);
   }
 
-  // 너머 공간은 자기 조명을 가진다. 거리에 따라 꺼지는 PointLight가
-  // 복도 끝을 어둠으로 만들어 준다.
-  const lamp = new THREE.PointLight(0x99ddff, 6, PORTAL_DEPTH);
-  lamp.position.z = -1.2;
+  // 관은 자기 조명을 가진다. 거리에 따라 꺼지는 PointLight가 끝을 어둠으로
+  // 만들어 준다. 좁은 관이라 빛이 사방 벽에 바로 닿아서, 네모 복도 때보다
+  // 세기를 많이 낮춰야 한다.
+  const lamp = new THREE.PointLight(0x99ddff, 0.12, 1.1);
+  lamp.position.z = -0.5;
   portalWorld.add(lamp);
+
+  // 관 끝을 막는다. CylinderGeometry를 openEnded로 만들었으므로 끝이 뚫려
+  // 있는데, 기기에서는 우리가 아무것도 안 그린 픽셀에 패스스루가 채워진다 —
+  // 파이프 끝으로 진짜 방이 비쳐 보인다. 검은 원판 하나로 막는다.
+  const capMaterial = new THREE.MeshBasicMaterial({ color: 0x05060a, transparent: true });
+  registerFadeMaterial(capMaterial);
+  const cap = new THREE.Mesh(new THREE.CircleGeometry(PIPE_BORE / 2, 32), capMaterial);
+  cap.position.z = -PIPE_DEPTH;
+  clipToPortal(cap);
+  portalWorld.add(cap);
 
   // 아주 약한 환경광. 이게 없으면 램프가 닿지 않는 면이 완전히 검게 죽어서
   // 형태가 안 읽힌다. three.js의 조명은 부모와 무관하게 씬 전체에 작용하지만,
@@ -733,7 +762,7 @@ linkSurfaces(
   corridorFloor,
   { nx: 0, nz: 1, at: 0 },
   wallFace,
-  { nx: 0, nz: -1, at: 0, halfWidth: PORTAL_WIDTH / 2 },
+  { nx: 0, nz: -1, at: 0, halfWidth: PIPE_BORE / 2 },
 );
 
 // 걸레받이: 벽면의 +Z 끝(= 바닥까지의 낙차)과 방 바닥의 -Z 끝이 만난다.
@@ -757,8 +786,14 @@ roomFloor.hugEdges = true;
 
 // 돌아다닐 범위. 면마다 모양이 달라서 따로 준다.
 // 복도 바닥은 구멍 안쪽으로 좁게, 방 바닥은 넓게.
-/** 복도 폭의 절반. 벽에 몸이 반쯤 박혀 보이지 않게 조금 안쪽으로 둔다. */
-const CORRIDOR_HALF_X = PORTAL_WIDTH / 2 - 0.05;
+/**
+ * 관 바닥에서 걸을 수 있는 폭의 절반.
+ *
+ * 관은 둥글어서 구경 끝으로 갈수록 바닥이 솟는다. 가운데 쪽만 평평하다고 치고
+ * 그만큼만 쓴다. 여덟 마리가 들어가기엔 좁지만, 길이 방향으로 줄을 서면 된다 —
+ * 파이프 안에서 꿈틀대며 밀리는 게 그림으로도 맞다.
+ */
+const CORRIDOR_HALF_X = PIPE_BORE * 0.3;
 corridorFloor.boundHalfX = CORRIDOR_HALF_X;
 corridorFloor.boundCenterZ = -0.12;
 corridorFloor.boundHalfZ = 0.2;
@@ -777,7 +812,7 @@ roomFloor.boundHalfZ = 0.9;
 //
 // 구멍으로 안쪽을 들여다보면 뭔가 움직이는 게 먼저 보이고, 그 다음에 나온다.
 const LURK_CENTER_Z = -0.55; // 구멍에서 이만큼 안쪽을 서성인다
-// 복도 안쪽 반폭이 PORTAL_WIDTH/2 + 0.1이다. 여덟 마리가 한 원에 몰리지
+// 복도 안쪽 반폭이 PIPE_BORE/2 + 0.1이다. 여덟 마리가 한 원에 몰리지
 // 않도록 그 안에서 최대한 넓게 잡는다.
 const LURK_RADIUS = 0.35;
 /**
@@ -1148,7 +1183,7 @@ function layOutSurfaces(): void {
   // 벽과 겹쳐 z-fighting이 나지 않게 법선 쪽으로 1mm 띄운다.
   const sill = new THREE.Vector3()
     .copy(portal.position)
-    .addScaledVector(WORLD_UP, -PORTAL_HEIGHT / 2)
+    .addScaledVector(WORLD_UP, -PIPE_BORE / 2)
     .addScaledVector(portalNormal, 0.001);
 
   // 복도 바닥: 수평, 등은 위를 보고, +Z가 구멍 밖을 향한다.
@@ -1174,12 +1209,12 @@ function layOutSurfaces(): void {
   wallToFloor.at = dropHeight;
   wallToFloor.halfWidth = dropHeight > 0.05 ? Infinity : 0;
   // 벽면은 포털보다 양옆으로 조금 더 넓다. 바퀴가 구멍 옆 벽으로도 번진다.
-  wallFace.boundHalfX = PORTAL_WIDTH / 2 + 0.2;
+  wallFace.boundHalfX = PIPE_BORE / 2 + 0.2;
   wallFace.boundCenterZ = dropHeight / 2;
   wallFace.boundHalfZ = dropHeight / 2;
   // 사각형의 -Z 변이 곧 아래턱 선이다. 그 위는 벽이 아니라 구멍이라, 구멍 폭
   // 안쪽만 열어 둔다 — 거기로는 복도로 되돌아 들어가고, 그 밖은 막힌 벽이다.
-  wallFace.boundGapHalfWidth = PORTAL_WIDTH / 2;
+  wallFace.boundGapHalfWidth = PIPE_BORE / 2;
 
   for (const surface of [corridorFloor, wallFace, roomFloor]) {
     surface.node.updateMatrixWorld();
@@ -1380,11 +1415,11 @@ function linkPortalToWall(): void {
       at: wallLocal.x * nx + wallLocal.z * nz,
       alongCenter: -wallLocal.x * nz + wallLocal.z * nx,
       // 구멍 폭만큼만 열려 있다. 그 밖은 막힌 벽이다.
-      halfWidth: PORTAL_WIDTH / 2,
+      halfWidth: PIPE_BORE / 2,
       // 아래턱을 위로 넘어서는 것 = 구멍 안으로 들어가는 것이다. 구멍 높이
       // 만큼만 본다 — 띠가 없으면 구멍보다 한참 위를 기어가는 바퀴까지
       // '넘어섰다'로 잡혀 허공에서 복도로 빨려 들어간다.
-      band: PORTAL_HEIGHT,
+      band: PIPE_BORE,
     },
   );
   portalLink = [
@@ -1967,6 +2002,13 @@ renderer.setAnimationLoop((time, frame) => {
 // 거기서 아무것도 하지 않는다.
 // ---------------------------------------------------------------------------
 Object.assign(window, {
+  // 미리보기 카메라를 아무 데나 놓고 아무 데나 보게 한다. 파이프 구경이
+  // 14cm라 기본 자리에서는 점만 하다.
+  view: (px = 0, py = 1.2, pz = -0.9, tx = 0, ty = 1.2, tz = -1.3) => {
+    camera.position.set(px, py, pz);
+    camera.lookAt(tx, ty, tz);
+    return camera.position.toArray().map((c) => +c.toFixed(2));
+  },
   // 평면이 한 프레임 사라지는 일을 흉내 내는 창구.
   blink: (ms = 100) => {
     blinkFakeRoom(ms);

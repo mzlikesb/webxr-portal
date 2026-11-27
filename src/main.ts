@@ -11,6 +11,9 @@ import {
 import type { PortalCrossing } from './portal-crossing';
 import { makeInstanceBatch } from './instance-batch';
 import { makeHandTracker } from './hands';
+import { fakeRoomFrame, fakeRoomSpace } from './fake-room';
+import { makeRoomShell } from './room-shell';
+import type { ShellSurface } from './room-shell';
 import {
   linkSurfaces,
   makeWalkSurface,
@@ -978,6 +981,25 @@ const surfaceGrids = [
   return grid;
 });
 
+// ---------------------------------------------------------------------------
+// 방 껍데기
+//
+// 감지된 벽·바닥·천장을 걸을 수 있는 면으로 바꾼다. 포털이 만드는 면들과 달리
+// 좌표를 계산하지 않는다 — 런타임이 주는 평면 자세를 그대로 쓴다.
+// 면끼리 모서리로 잇는 건 다음 단계다. 지금은 면이 제자리에 서는지만 본다.
+// ---------------------------------------------------------------------------
+
+const roomShell = makeRoomShell(scene);
+
+/** [임시] 새로 생긴 껍데기 면에 격자를 깔아 눈으로 확인한다. */
+function addShellGrid(shell: ShellSurface): void {
+  const size = Math.max(shell.width, shell.depth);
+  const grid = new THREE.GridHelper(size, Math.round(size * 10), 0x554433, 0x332222);
+  // 격자는 정사각형이다. 사각형 범위에 맞춰 축마다 다르게 줄인다.
+  grid.scale.set(shell.width / size, 1, shell.depth / size);
+  shell.surface.node.add(grid);
+}
+
 /**
  * 바퀴 한 마리와 그에 딸린 것들.
  *
@@ -1182,6 +1204,26 @@ renderer.setAnimationLoop((time, frame) => {
   const viewer = frame === undefined ? camera : renderer.xr.getCamera();
   viewer.getWorldPosition(viewerPosition);
 
+  // 방 껍데기를 먼저 갱신한다. 바퀴를 움직이기 전이어야 한다 — 바퀴는 면의
+  // matrixWorld를 읽어 자기 자리를 정하고, 그 계산이 렌더보다 먼저 돈다.
+  //
+  // 법선이 방 안쪽을 보는지 판정할 기준점으로 머리 위치를 넘긴다. 사람은
+  // 늘 방 안에 있으므로, 벽이든 바닥이든 천장이든 한 가지 규칙으로 풀린다.
+  // 세션 밖에서는 가짜 방을 먹인다. detectedPlanes는 XR에만 와서, 이게 없으면
+  // 이 코드는 데스크톱에서 한 줄도 돌지 않는다 — 맞는지 틀렸는지 알 수가 없다.
+  // 미리보기 전용 발판이다.
+  const shellFrame = frame ?? fakeRoomFrame;
+  const shellSpace = frame === undefined ? fakeRoomSpace : renderer.xr.getReferenceSpace();
+  if (shellSpace !== null) {
+    for (const shell of roomShell.sync(shellFrame, shellSpace, viewerPosition)) {
+      addShellGrid(shell);
+      log(
+        `껍데기 면 ${shell.label} ${shell.width.toFixed(2)}×${shell.depth.toFixed(2)}m` +
+          `${shell.flipped ? ' (법선 뒤집음)' : ''} · 모두 ${roomShell.surfaces.length}개`,
+      );
+    }
+  }
+
   // 아직 복도에 있고, 사람이 가까이서 포털 쪽을 보고 있으면 이제 나온다.
   if (!hasEmerged && portalPlaced) {
     toPortal.subVectors(portal.position, viewerPosition);
@@ -1293,6 +1335,24 @@ renderer.setAnimationLoop((time, frame) => {
 // [임시] 미리보기에서 바퀴가 범위 안에 있는지 콘솔로 확인하려고 둔 창구.
 // 합치기 전에 지운다.
 Object.assign(window, {
+  // [임시] 껍데기 면들의 자리와 법선. 전부 방 안쪽을 봐야 한다.
+  shell: () =>
+    roomShell.surfaces.map((s) => {
+      const p = s.surface.node.getWorldPosition(new THREE.Vector3());
+      const n = new THREE.Vector3(0, 1, 0).applyQuaternion(
+        s.surface.node.getWorldQuaternion(new THREE.Quaternion()),
+      );
+      const r = (v: THREE.Vector3) =>
+        [v.x, v.y, v.z].map((c) => +c.toFixed(2)).join(',');
+      return {
+        면: s.label,
+        원점: r(p),
+        법선: r(n),
+        반폭: +s.surface.boundHalfX.toFixed(2),
+        반깊이: +s.surface.boundHalfZ.toFixed(2),
+        뒤집음: s.flipped,
+      };
+    }),
   // [임시] 책상 네 옆면의 원점 높이. 전부 책상 높이여야 한다.
   sides: () =>
     tableSides.map((side) => +side.node.getWorldPosition(new THREE.Vector3()).y.toFixed(3)),

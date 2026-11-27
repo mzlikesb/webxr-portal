@@ -962,11 +962,20 @@ function layOutSurfaces(): void {
     .addScaledVector(portalNormal, TABLE_HALF_Z + 0.45);
   layOutTable(tablePoint, portalNormal);
 
-  // 복도 바닥과 책상이 방금 옮겨 갔다. 방과 만나는 자리도 다시 구한다.
-  roomShell.rebuild();
-  // 포털이 다른 벽으로 옮겨 갔을 수도 있다.
-  linkPortalToWall();
+  // 방과 다시 잇는 건 여기서 하지 않는다. 이 함수는 포털을 놓은 뒤 매 프레임
+  // 도는데(바퀴가 면의 자세를 읽기 전에 자리를 맞춰야 한다), 거기에 모서리
+  // 재생성을 붙여 두었더니 스물네 개를 매 프레임 다시 만들고 로그도 매 프레임
+  // DOM에 붙었다. 쌓이는 문자열을 프레임마다 다시 만드는 비용이 따로 붙는다.
+  // 실제로 바뀐 때만 하도록 깃발만 세운다.
+  needsRelink = true;
 }
+
+/**
+ * 복도 바닥과 책상이 옮겨 갔으니 방과 만나는 자리를 다시 구해야 하는지.
+ *
+ * 포털을 놓을 때와 평면이 처음 들어올 때만 참이 된다.
+ */
+let needsRelink = false;
 
 
 // 걸음이 미끄러지는지, 모서리를 어떻게 넘는지 보려면 면에 무늬가 있어야
@@ -1070,6 +1079,7 @@ function linkPortalToWall(): void {
   }
   portalLink = [];
 
+  const changed = portalWall !== shell.surface;
   portalWall = shell.surface;
   portalWall.node.updateMatrixWorld();
 
@@ -1114,7 +1124,7 @@ function linkPortalToWall(): void {
   }
   wallFace.edges = [];
   roomFloor.edges = [];
-  log('감지된 벽·바닥으로 간다 — 손으로 세운 벽면·방 바닥은 뺐다');
+  if (changed) log('감지된 벽·바닥으로 간다 — 손으로 세운 벽면·방 바닥은 뺐다');
 }
 
 const wallDown = new THREE.Vector3();
@@ -1437,7 +1447,14 @@ renderer.setAnimationLoop((time, frame) => {
   const shellFrame = frame ?? fakeRoomFrame;
   const shellSpace = frame === undefined ? fakeRoomSpace : renderer.xr.getReferenceSpace();
   if (shellSpace !== null) {
-    for (const shell of roomShell.sync(shellFrame, shellSpace, viewerPosition)) {
+    const newShells = roomShell.sync(shellFrame, shellSpace, viewerPosition);
+    // 평면이 늘었다. 포털이 걸린 벽이 이제야 들어왔을 수 있다.
+    //
+    // 'portalWall이 아직 null이면'으로 두면 안 된다 — 스캔한 적 없는 방에서는
+    // 영영 null이라, 매 프레임 모서리를 다시 세우게 된다.
+    if (newShells.length > 0) needsRelink = true;
+
+    for (const shell of newShells) {
       addShellGrid(shell);
       // [임시] 넘어간 기록을 읽을 수 있게 이름을 붙여 둔다.
       SURFACE_NAMES.set(shell.surface, `${shell.label}${SURFACE_NAMES.size}`);
@@ -1449,7 +1466,7 @@ renderer.setAnimationLoop((time, frame) => {
     }
     // 포털이 걸린 벽은 평면이 들어온 뒤에야 알 수 있다. 찾을 때까지 매 프레임
     // 두드린다 — 찾으면 portalWall이 차고, 그 뒤로는 바로 빠져나온다.
-    if (portalWall === null) linkPortalToWall();
+
     aimPortalWallDown();
   }
 
@@ -1486,11 +1503,17 @@ renderer.setAnimationLoop((time, frame) => {
   }
 
   if (dt > 0) fps += (1 / dt - fps) * Math.min(1, dt * 3);
-  debugPanel.setLines([
-    `${fps.toFixed(0)} fps · 평면 ${planeMeshes.size}개`,
-    `껍데기 ${roomShell.surfaces.length}면 · 모서리 ${roomShell.edgeCount}개`,
-    ...planeSummary(),
-  ]);
+
+  // 글자는 패널이 보일 때만 만든다. 늘 만들면 문자열과 배열이 매 프레임
+  // 버려지고, VR에서는 그 쓰레기가 모였다 터질 때 프레임이 튄다. 보이기
+  // 시작한 첫 프레임만 직전 내용을 쓰는데, 그건 눈에 안 보인다.
+  if (debugPanel.group.visible) {
+    debugPanel.setLines([
+      `${fps.toFixed(0)} fps · 평면 ${planeMeshes.size}개`,
+      `껍데기 ${roomShell.surfaces.length}면 · 모서리 ${roomShell.edgeCount}개`,
+      ...planeSummary(),
+    ]);
+  }
   debugPanel.update(panelHands, viewerPosition);
 
   const speedScale = speedSlider === null ? 1 : Number(speedSlider.value);
@@ -1549,6 +1572,11 @@ renderer.setAnimationLoop((time, frame) => {
   if (portalPlaced) {
     // 포털을 놓은 자리에 면들을 맞춘다.
     layOutSurfaces();
+    if (needsRelink) {
+      needsRelink = false;
+      roomShell.rebuild();
+      linkPortalToWall();
+    }
     for (const grid of surfaceGrids) grid.visible = frame === undefined;
 
     portalFacing.set(0, 0, 1).applyQuaternion(portal.quaternion);

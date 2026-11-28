@@ -1906,8 +1906,13 @@ renderer.domElement.addEventListener('pointerdown', () => {
 // 들어오고, 세션 밖에서는 undefined다.
 let lastFrameTime = 0;
 
-/** 한 프레임. 이름을 붙여 둔 이유는 바로 아래 tick 창구 때문이다. */
-function renderFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
+/**
+ * 한 프레임의 '계산'. 그리는 건 아래 renderFrame이 한다.
+ *
+ * 둘로 나눈 이유는 renderFrame의 주석에 있다. 이름을 붙여 둔 건 tick 창구가
+ * 이걸 손으로 돌리기 때문이다.
+ */
+function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
   // setAnimationLoop은 밀리초 타임스탬프를 준다. 첫 프레임은 이전 값이 없어
   // dt가 통째로 튀므로 버린다. 상한을 두는 건 탭이 백그라운드로 갔다 오면
   // dt가 몇 초짜리로 들어와서 다리가 순간이동하기 때문이다.
@@ -2020,6 +2025,10 @@ function renderFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
           `평면 ${planeMeshes.size} · 껍데기 ${roomShell.surfaces.length}면` +
             ` · 모서리 ${roomShell.edgeCount}`,
           `짜부 ${squashed}마리${lastSmash === '' ? '' : ` (마지막 ${lastSmash})`}`,
+          // 파이프가 어디에 뚫렸는지. 자리를 코드가 고르게 된 뒤로는, 헤드셋에서
+          // 뭔가 이상할 때 제일 먼저 알아야 하는 값이 이것이다.
+          `파이프 ${portalPlaced ? pipeHostLabel : '아직'}` +
+            `${frameFailures > 0 ? ` · 프레임 터짐 ${frameFailures}회: ${lastFrameError}` : ''}`,
           ...planeSummary(),
         ]);
       }
@@ -2114,6 +2123,54 @@ function renderFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
   // 한 번도 눈으로 볼 수 없었고, 그래서 잘못된 줄도 몰랐다. 머리 위치만
   // 있으면 되는 계산이라 미리보기 카메라로도 똑같이 돈다.
   if (portalPlaced) updatePortalFade(viewerPosition);
+}
+
+/** 프레임이 터진 횟수. 한 번 터지면 보통 매 프레임 터진다. */
+let frameFailures = 0;
+/** 마지막으로 터진 내용. 손바닥 패널에 띄워서 세션 안에서 읽는다. */
+let lastFrameError = '';
+
+/**
+ * 한 프레임. 계산이 터져도 renderer.render는 반드시 지나간다.
+ *
+ * 이게 없으면 계산 중에 예외 하나만 나도 헤드셋이 통째로 검게 된다. 패스스루가
+ * 남는 게 아니다 — AR에서 우리가 안 그린 픽셀에 패스스루가 합성되는 건
+ * renderer.render가 프레임버퍼를 투명으로 클리어해 줄 때의 이야기다. 거기까지
+ * 못 가면 클리어도 안 되고, XR 레이어에 담긴 건 검정이다. 그리고 그 상태에서는
+ * 콘솔도 DOM도 손바닥 패널도 안 보이니, 무엇이 터졌는지 알 길이 통째로 없다.
+ *
+ * 실제로 그렇게 됐다. 파이프가 스스로 자리를 고르게 바꾼 뒤 헤드셋에서 검은
+ * 화면만 나왔고, 데스크톱 미리보기는 멀쩡해서 어디가 터지는지 짚을 수가 없었다.
+ *
+ * 그래서 계산과 그리기를 나눈다. 터지면 그 프레임의 계산만 버리고, 장면은
+ * 직전 상태로 그려지고, 터진 내용은 손바닥 패널에 뜬다. 디버그 패널에 이미
+ * 같은 울타리를 쳐 뒀는데(아래 panelFailed), 들여다보는 도구가 작품을 지울 수
+ * 없어야 한다면 작품 자신도 자기를 지울 수 없어야 한다.
+ */
+function renderFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
+  try {
+    stepFrame(time, frame);
+  } catch (error) {
+    frameFailures += 1;
+    lastFrameError = error instanceof Error ? error.message : String(error);
+    // 매 프레임 터지면 로그가 터진다. 처음 몇 개만 남긴다.
+    if (frameFailures <= 3) {
+      log(`[프레임 터짐 ${frameFailures}] ${lastFrameError}`);
+      if (error instanceof Error && error.stack !== undefined) {
+        log(error.stack.split('\n').slice(0, 3).join(' | '));
+      }
+    }
+    // 세션 안에서 이걸 읽을 유일한 길이 손바닥 패널이다. 패널 갱신이
+    // stepFrame 안에 있어서, 그 앞에서 터지면 패널은 묵은 내용을 들고 있다.
+    if (!panelFailed) {
+      try {
+        debugPanel.setLines([`프레임 터짐 ${frameFailures}회`, lastFrameError]);
+        debugPanel.update(handTracker.hands, viewerPosition);
+      } catch {
+        panelFailed = true;
+      }
+    }
+  }
 
   renderer.render(scene, camera);
 }

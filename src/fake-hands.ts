@@ -114,7 +114,11 @@ export function setFakeFingertip(x: number, y: number, z: number): void {
  *
  * @param gap 엄지-검지 간격(m). 좁으면 집은 것, 넓으면 편 것.
  */
-export function setFakePinch(point: THREE.Vector3, gap: number): void {
+export function setFakePinch(
+  point: THREE.Vector3,
+  gap: number,
+  velocity?: THREE.Vector3,
+): void {
   const hand = fakeHands[1];
   hand.tracked = true;
   hand.tips[0].copy(point).addScaledVector(PINCH_AXIS, gap / 2);
@@ -125,7 +129,10 @@ export function setFakePinch(point: THREE.Vector3, gap: number): void {
   // 손바닥은 손가락 뒤에 둔다. 때리기는 손바닥으로만 판정하므로, 집는 동안
   // 때린 것이 되지 않게 멀찍이 두고 속도도 0으로 둔다.
   hand.palm.copy(point).addScaledVector(PINCH_AXIS, 0.08);
-  hand.palmVelocity.set(0, 0, 0);
+  // 던지는 속도는 손바닥 속도에서 읽는다. 안 주면 가만히 있는 손이다.
+  if (velocity === undefined) hand.palmVelocity.set(0, 0, 0);
+  else hand.palmVelocity.copy(velocity);
+  // 때리기는 최고 속력으로 가른다. 집는 손이 때린 것이 되면 안 된다.
   hand.peakSpeed = 0;
 }
 

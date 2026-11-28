@@ -1114,7 +1114,7 @@ function resetRoaches(): void {
     // 시체가 자국을 끌고 관으로 빨려 들어가지 않게, 판을 새로 깐다.
     // 쥐고 있던 놈도 손에서 놓인다.
     unit.heldBy = null;
-    unit.fallSpeed = 0;
+    unit.flying = false;
     unit.roach.revive();
     unit.pipe = pipe;
     unit.surface = pipe.corridor;
@@ -1870,8 +1870,10 @@ interface RoachUnit {
   pipe: Pipe;
   /** 지금 이 바퀴를 집고 있는 손. 아니면 null. */
   heldBy: TrackedHand | null;
-  /** 놓인 뒤 떨어지는 속도(m/s). 0보다 크면 떨어지는 중이다. */
-  fallSpeed: number;
+  /** 손을 떠나 날아가는 중인지. 걷지도 않고 모서리도 넘지 않는다. */
+  flying: boolean;
+  /** 그동안의 속도(월드, m/s). flying이 false면 뜻이 없다. */
+  flight: THREE.Vector3;
 }
 
 /** 몇 마리나 둘지. 드로우콜을 재 보려고 올려 둔 값이기도 하다. */
@@ -1906,7 +1908,15 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
   // 따라가는 '안쪽 복사본'이 옆에 생긴다.
   const crossing = makePipeCrossing(roach.root);
   crossing.setPipe(pipe.index);
-  units.push({ roach, crossing, surface: pipe.corridor, pipe, heldBy: null, fallSpeed: 0 });
+  units.push({
+    roach,
+    crossing,
+    surface: pipe.corridor,
+    pipe,
+    heldBy: null,
+    flying: false,
+    flight: new THREE.Vector3(),
+  });
 
   // 두 벌 모두 배칭에 넘긴다. 안쪽은 재질이 달라 따로 묶인다.
   roachBatch.register(roach.root);
@@ -2060,7 +2070,7 @@ function applyTouches(hands: TrackedHand[]): void {
       for (const unit of units) {
         // 쥐고 있는 놈은 이미 손안이다. 놀랄 것도 없고, 집은 손가락이
         // 매 프레임 자기가 쥔 벌레를 놀래키는 것도 말이 안 된다.
-        if (unit.heldBy !== null || unit.fallSpeed > 0) continue;
+        if (unit.heldBy !== null || unit.flying) continue;
         tipLocal.copy(tip);
         unit.surface.node.worldToLocal(tipLocal);
 
@@ -2101,7 +2111,7 @@ function applySmashes(hands: TrackedHand[]): void {
     for (const point of [hand.palm]) {
       for (const unit of units) {
         if (unit.roach.isSquashed()) continue;
-        if (unit.heldBy !== null || unit.fallSpeed > 0) continue;
+        if (unit.heldBy !== null || unit.flying) continue;
 
         const node = unit.surface.node;
         palmLocal.copy(point);
@@ -2175,12 +2185,33 @@ const HANG_DROP = 0.008;
  * 떨어지는 것이 아니라 사라졌다 나타나는 것으로 보인다.
  */
 const FALL_GRAVITY = 6;
+/**
+ * 던질 수 있는 최고 속력(m/s). 손이 더 빨라도 여기서 자른다.
+ *
+ * 손 속도를 그대로 쓰면 팔을 휘두른 한 번에 벌레가 방을 가로질러 반대쪽
+ * 벽까지 날아간다. 그건 던진 게 아니라 쏜 것이다.
+ */
+const THROW_SPEED_MAX = 3.5;
+/**
+ * 공기 저항(1/초).
+ *
+ * 4cm짜리 몸은 공기에 금방 먹힌다. 이게 없으면 포탄처럼 곧게 날아가는데,
+ * 던져진 벌레는 그렇게 날지 않는다 — 금방 느려지고 떨어진다.
+ */
+const FLIGHT_DRAG = 1.7;
 
 const pinchPoint = new THREE.Vector3();
 const grabLocal = new THREE.Vector3();
 const roachWorld = new THREE.Vector3();
 /** [미리보기 전용] 가짜 손이 지금 집고 있는 자리. 창구들이 나눠 쓴다. */
 const fakePinchAt = new THREE.Vector3();
+/** 손이 가만히 있을 때 쓰는 속도. 새로 만들지 않으려고 하나 둔다. */
+const ZERO_VELOCITY = new THREE.Vector3();
+const flightFrom = new THREE.Vector3();
+const flightTo = new THREE.Vector3();
+const landPoint = new THREE.Vector3();
+/** [미리보기 전용] 던지는 속도. */
+const tossVelocity = new THREE.Vector3();
 
 /** 떨어뜨린 바퀴가 착지할 면. 감지된 바닥이 있으면 그것, 없으면 손으로 세운 것. */
 function landingSurface(): WalkSurface {
@@ -2202,13 +2233,94 @@ function carryRoach(unit: RoachUnit, point: THREE.Vector3): void {
   unit.roach.root.position.y -= HANG_DROP;
 }
 
-function dropRoach(unit: RoachUnit): void {
+/**
+ * 손에서 놓는다. 손이 움직이고 있었으면 그대로 날아간다.
+ *
+ * @param velocity 놓는 순간의 손 속도(월드). 가만히 놓으면 그냥 떨어진다.
+ */
+function dropRoach(unit: RoachUnit, velocity: THREE.Vector3): void {
   if (unit.heldBy === null) return;
   unit.heldBy = null;
-  // 바로 땅에 붙이지 않는다. 놓은 높이에서 떨어진다. 0보다 커야 '떨어지는
-  // 중'으로 읽히므로 아주 작은 값에서 시작한다.
-  unit.fallSpeed = 0.001;
-  log(`${units.indexOf(unit)}번을 놓았다`);
+  unit.flying = true;
+  unit.flight.copy(velocity);
+  if (unit.flight.length() > THROW_SPEED_MAX) unit.flight.setLength(THROW_SPEED_MAX);
+  log(`${units.indexOf(unit)}번을 놓았다 (${unit.flight.length().toFixed(1)}m/s)`);
+}
+
+const landLocalFrom = new THREE.Vector3();
+const landLocalTo = new THREE.Vector3();
+
+/**
+ * 면보다 이만큼 뒤에서 출발한 것까지는 '면 앞'으로 쳐준다(m).
+ *
+ * 벽에 붙어 있던 놈을 떼어내면 그 벽 평면 위에 선 채로 출발한다. 0을 기준으로
+ * 가르면 그건 '이미 벽 뒤'라 판정에서 빠지고, 그 벽으로 도로 던지면 벽을
+ * 그냥 통과한다 — 실제로 2.6m 밖, 방 바깥 허공에 떨어졌다.
+ *
+ * 띠를 두면 그 경우가 t = 0, 즉 '출발하자마자 부딪혔다'로 풀린다. 제 벽으로
+ * 던진 벌레가 그 자리에 철썩 붙는 그림이고, 그게 맞다.
+ */
+const LANDING_SKIN = 0.02;
+
+/**
+ * 날아간 선분이 처음 만나는 면. 아무 데도 안 닿았으면 null.
+ *
+ * 면은 전부 평면이고 법선이 방 안쪽을 본다. 그래서 '방 쪽에서 출발해 반대쪽
+ * 으로 넘어갔는가' 한 가지만 보면 벽이든 바닥이든 천장이든 같은 식이 된다 —
+ * 날아가는 동안 로컬 y가 양수에서 음수로 바뀌는 면이 부딪힌 면이다.
+ *
+ * 점이 아니라 선분으로 본다. 던진 속도에 프레임이 길면 한 프레임에 40cm를
+ * 가는데, 점으로 재면 그 사이의 벽을 그냥 통과해 버린다.
+ *
+ * @param out 닿은 자리를 그 면의 로컬 좌표로 담는다
+ */
+function findLanding(
+  from: THREE.Vector3,
+  to: THREE.Vector3,
+  out: THREE.Vector3,
+): WalkSurface | null {
+  let best: WalkSurface | null = null;
+  let nearest = Infinity;
+
+  function consider(surface: WalkSurface, halfX: number, halfZ: number, centerZ: number): void {
+    const node = surface.node;
+    node.updateMatrixWorld();
+    landLocalFrom.copy(from);
+    node.worldToLocal(landLocalFrom);
+    landLocalTo.copy(to);
+    node.worldToLocal(landLocalTo);
+
+    // 한참 뒤에서 출발했거나, 아직 안 넘었으면 이번 프레임에 닿은 게 아니다.
+    if (landLocalFrom.y <= -LANDING_SKIN || landLocalTo.y > 0) return;
+
+    // 이 프레임에 면 '쪽으로' 파고들어야 부딪힌 것이다. 면을 따라 나란히
+    // 가거나 멀어지는 중이면 아니다 — 이게 없으면 벽에서 떼어낸 놈이 어느
+    // 방향으로 던져도 제자리에 도로 붙는다. 출발점이 그 벽 평면 위라서다.
+    const span = landLocalFrom.y - landLocalTo.y;
+    if (span <= 1e-6) return;
+
+    // 띠 안에서 출발했으면 t가 음수로 나온다. 그건 '출발점이 곧 접점'이다.
+    const t = THREE.MathUtils.clamp(landLocalFrom.y / span, 0, 1);
+    if (t >= nearest) return;
+
+    // 평면에는 끝이 있다. 사각형 밖으로 지나갔으면 그 면을 스친 게 아니다.
+    const x = landLocalFrom.x + (landLocalTo.x - landLocalFrom.x) * t;
+    const z = landLocalFrom.z + (landLocalTo.z - landLocalFrom.z) * t;
+    if (Math.abs(x) > halfX) return;
+    if (Math.abs(z - centerZ) > halfZ) return;
+
+    nearest = t;
+    best = surface;
+    out.set(x, 0, z);
+  }
+
+  for (const shell of roomShell.surfaces) {
+    consider(shell.surface, shell.width / 2, shell.depth / 2, 0);
+  }
+  // 책상 상판도 받아 준다. 던진 것이 책상을 뚫고 바닥까지 가면 안 된다.
+  consider(tableTop, table.halfX, table.halfZ, 0);
+
+  return best;
 }
 
 /**
@@ -2233,7 +2345,8 @@ function applyGrabs(hands: TrackedHand[]): void {
 
     // 손이 시야에서 사라지면 놓은 것이다. 쥔 채로 얼어붙어 있으면 안 된다.
     if (!hand.tracked) {
-      if (held !== undefined) dropRoach(held);
+      // 손이 사라졌으니 던진 속도도 믿을 수 없다. 그냥 떨어뜨린다.
+      if (held !== undefined) dropRoach(held, ZERO_VELOCITY);
       continue;
     }
 
@@ -2242,7 +2355,7 @@ function applyGrabs(hands: TrackedHand[]): void {
     pinchPoint.addVectors(hand.tips[0], hand.tips[1]).multiplyScalar(0.5);
 
     if (held !== undefined) {
-      if (gap > PINCH_OPEN) dropRoach(held);
+      if (gap > PINCH_OPEN) dropRoach(held, hand.palmVelocity);
       else carryRoach(held, pinchPoint);
       continue;
     }
@@ -2253,7 +2366,7 @@ function applyGrabs(hands: TrackedHand[]): void {
     let caught: RoachUnit | undefined;
     let shortest = GRAB_RADIUS;
     for (const unit of units) {
-      if (unit.heldBy !== null || unit.fallSpeed > 0) continue;
+      if (unit.heldBy !== null || unit.flying) continue;
       if (unit.roach.isSquashed()) continue;
       unit.roach.root.getWorldPosition(roachWorld);
       const distance = roachWorld.distanceTo(pinchPoint);
@@ -2274,7 +2387,7 @@ function applyGrabs(hands: TrackedHand[]): void {
     }
 
     caught.heldBy = hand;
-    caught.fallSpeed = 0;
+    caught.flying = false;
     caught.roach.hold();
     carryRoach(caught, pinchPoint);
     log(`${units.indexOf(caught)}번을 집었다`);
@@ -2465,7 +2578,7 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
       if (a.surface !== b.surface) continue;
       // 손안에 있거나 떨어지는 중인 놈은 땅 위의 짝이 아니다.
       if (a.heldBy !== null || b.heldBy !== null) continue;
-      if (a.fallSpeed > 0 || b.fallSpeed > 0) continue;
+      if (a.flying || b.flying) continue;
       // 관처럼 좁은 데서는 비키지 않는다. 이유는 AVOID_MIN_HALF_X 주석에.
       if (a.surface.boundHalfX < AVOID_MIN_HALF_X) continue;
       if (a.roach.isSquashed() || b.roach.isSquashed()) continue;
@@ -2488,13 +2601,35 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
       unit.roach.update(dt, 1, null);
       continue;
     }
-    if (unit.fallSpeed > 0) {
+    if (unit.flying) {
       unit.roach.update(dt, 1, null);
-      unit.fallSpeed += FALL_GRAVITY * dt;
-      unit.roach.root.position.y -= unit.fallSpeed * dt;
+
+      unit.roach.root.getWorldPosition(flightFrom);
+      unit.flight.y -= FALL_GRAVITY * dt;
+      unit.flight.multiplyScalar(Math.max(0, 1 - FLIGHT_DRAG * dt));
+      flightTo.copy(flightFrom).addScaledVector(unit.flight, dt);
+
+      const landed = findLanding(flightFrom, flightTo, landPoint);
+      if (landed !== null) {
+        // 부딪힌 면에 그대로 붙는다. 벽이든 천장이든 상관없다 — 바퀴는
+        // 원래 거기 붙어 사는 것이고, 면 하나하나가 이미 걸을 수 있는 면이다.
+        unit.flying = false;
+        unit.surface = landed;
+        unit.roach.placeOn(landed.node, landPoint.x, landPoint.z, unit.roach.getHeading());
+        applySurface(unit);
+        unit.roach.land();
+        continue;
+      }
+
+      // 아직 공중이다. 월드 자리를 지금 딛고 있던 면의 로컬로 되돌려 둔다.
+      unit.surface.node.worldToLocal(flightTo);
+      unit.roach.root.position.copy(flightTo);
+
+      // 감지된 면이 하나도 없는 방에서는 위의 찾기가 아무것도 못 찾는다.
+      // 손으로 세운 바닥이 마지막 받침이다.
       if (unit.roach.root.position.y <= 0) {
         unit.roach.root.position.y = 0;
-        unit.fallSpeed = 0;
+        unit.flying = false;
         unit.roach.land();
         applySurface(unit);
       }
@@ -2809,12 +2944,18 @@ Object.assign(window, {
     setFakePinch(fakePinchAt, 0.09);
     return '놓았다';
   },
+  // 던진다. 손 속도를 주면서 손가락을 벌린다.
+  toss: (vx = 2, vy = 0.8, vz = 0) => {
+    tossVelocity.set(vx, vy, vz);
+    setFakePinch(fakePinchAt, 0.09, tossVelocity);
+    return tossVelocity.toArray();
+  },
   // 누가 손에 있고 누가 떨어지는 중인지.
   hands: () =>
     units.map((unit, i) => ({
       번호: i,
       쥠: unit.heldBy !== null,
-      낙하: +unit.fallSpeed.toFixed(2),
+      비행: unit.flying ? +unit.flight.length().toFixed(2) : 0,
       높이: +unit.roach.root.position.y.toFixed(3),
       면: SURFACE_NAMES.get(unit.surface) ?? '?',
     })),

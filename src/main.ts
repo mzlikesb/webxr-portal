@@ -11,6 +11,8 @@ import {
 } from './portal-crossing';
 import type { PipeCrossing } from './portal-crossing';
 import { makeInstanceBatch } from './instance-batch';
+import { makeProps } from './props';
+import type { Prop } from './props';
 import { makeHandTracker } from './hands';
 import type { TrackedHand } from './hands';
 import { makeDebugPanel } from './debug-panel';
@@ -2342,11 +2344,13 @@ function pinchGapText(hands: TrackedHand[]): string {
 function applyGrabs(hands: TrackedHand[]): void {
   for (const hand of hands) {
     const held = units.find((unit) => unit.heldBy === hand);
+    const heldProp = props.find((prop) => prop.heldBy === hand);
 
     // 손이 시야에서 사라지면 놓은 것이다. 쥔 채로 얼어붙어 있으면 안 된다.
     if (!hand.tracked) {
       // 손이 사라졌으니 던진 속도도 믿을 수 없다. 그냥 떨어뜨린다.
       if (held !== undefined) dropRoach(held, ZERO_VELOCITY);
+      if (heldProp !== undefined) throwProp(heldProp, ZERO_VELOCITY);
       continue;
     }
 
@@ -2360,11 +2364,30 @@ function applyGrabs(hands: TrackedHand[]): void {
       continue;
     }
 
+    if (heldProp !== undefined) {
+      if (gap > PINCH_OPEN) {
+        throwProp(heldProp, hand.palmVelocity);
+      } else {
+        propFrom.copy(heldProp.previous);
+        heldProp.node.position.copy(pinchPoint);
+        // 쥔 채로 내려치는 것도 때린 것이다. 던지기 전에 사람이 먼저 하는 게
+        // 이쪽이고, 던지는 것만 맞으면 '왜 안 죽지'가 된다.
+        if (hand.peakSpeed > SMASH_SPEED) {
+          crushWith(heldProp, propFrom, heldProp.node.position);
+        }
+        heldProp.previous.copy(heldProp.node.position);
+      }
+      continue;
+    }
+
     if (gap > PINCH_CLOSE) continue;
 
-    // 집는 자리에서 가장 가까운 한 마리. 둘을 한꺼번에 집지는 않는다.
+    // 집는 자리에서 가장 가까운 것 하나. 바퀴든 물건이든, 둘을 한꺼번에
+    // 집지는 않는다.
     let caught: RoachUnit | undefined;
+    let caughtProp: Prop | undefined;
     let shortest = GRAB_RADIUS;
+
     for (const unit of units) {
       if (unit.heldBy !== null || unit.flying) continue;
       if (unit.roach.isSquashed()) continue;
@@ -2373,6 +2396,28 @@ function applyGrabs(hands: TrackedHand[]): void {
       if (distance >= shortest) continue;
       shortest = distance;
       caught = unit;
+    }
+
+    for (const prop of props) {
+      if (!prop.node.visible || prop.heldBy !== null) continue;
+      // 물건은 제 크기만큼 더 너그럽게 잡힌다. 25cm짜리 슬리퍼를 중심에서
+      // 5cm 안으로 집으라고 하면 거의 안 잡힌다.
+      const distance = prop.node.position.distanceTo(pinchPoint) - prop.radius;
+      if (distance >= shortest) continue;
+      shortest = distance;
+      caughtProp = prop;
+      caught = undefined;
+    }
+
+    if (caughtProp !== undefined) {
+      caughtProp.heldBy = hand;
+      caughtProp.flying = false;
+      caughtProp.sliding = false;
+      caughtProp.flight.set(0, 0, 0);
+      caughtProp.node.position.copy(pinchPoint);
+      caughtProp.previous.copy(pinchPoint);
+      log(`${caughtProp.label}을 집었다`);
+      continue;
     }
     if (caught === undefined) continue;
 
@@ -2391,6 +2436,218 @@ function applyGrabs(hands: TrackedHand[]): void {
     caught.roach.hold();
     carryRoach(caught, pinchPoint);
     log(`${units.indexOf(caught)}번을 집었다`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 바닥의 물건
+//
+// 바퀴를 본 사람이 제일 먼저 하는 건 손으로 때리는 게 아니라 뭘 집는 것이다.
+// 집는 손짓도 던지는 손짓도 바퀴와 똑같다 — 새로 배울 조작이 없다.
+// ---------------------------------------------------------------------------
+/** 물건의 공기 저항(1/초). 바퀴보다 무거우니 덜 먹힌다. */
+const PROP_DRAG = 0.8;
+/** 벽에 부딪혔을 때 남는 속도의 비율. 슬리퍼는 벽에 붙지 않는다. */
+const PROP_BOUNCE = 0.35;
+/** 바닥에 닿는 순간 남는 가로 속도의 비율. */
+const PROP_SLIDE_KEEP = 0.6;
+/** 미끄러지는 동안의 마찰(1/초). */
+const PROP_FRICTION = 3.2;
+/** 이보다 느려지면 멎는다(m/s). */
+const PROP_STOP = 0.12;
+
+const props = makeProps();
+for (const prop of props) {
+  // 바닥이 들어오기 전에는 놓을 자리를 모른다. 그때까지 숨겨 둔다.
+  prop.node.visible = false;
+  scene.add(prop.node);
+}
+/** 바닥에 깔아 놨는지. 한 번만 한다 — 매 프레임 하면 던져 둔 것이 되돌아간다. */
+let propsPlaced = false;
+
+const propPoint = new THREE.Vector3();
+const propQuat = new THREE.Quaternion();
+const propNormal = new THREE.Vector3();
+const propFrom = new THREE.Vector3();
+const propTo = new THREE.Vector3();
+const segDelta = new THREE.Vector3();
+const segToPoint = new THREE.Vector3();
+const slideAbove = new THREE.Vector3();
+const slideBelow = new THREE.Vector3();
+
+/** 감지된 바닥이 들어오면 그 위에 흩어 놓는다. */
+function placeProps(): void {
+  if (propsPlaced) return;
+  const floor = roomShell.surfaces.find((shell) => shell.label === 'floor');
+  if (floor === undefined) return;
+
+  const node = floor.surface.node;
+  node.updateMatrixWorld();
+  node.getWorldQuaternion(propQuat);
+  propNormal.set(0, 1, 0).applyQuaternion(propQuat);
+
+  for (const prop of props) {
+    // 벽에 바짝 붙여 두면 집으려다 벽을 짚는다. 가장자리에서 당겨 놓는다.
+    const halfX = Math.max(0.2, floor.surface.boundHalfX - 0.35);
+    const halfZ = Math.max(0.2, floor.surface.boundHalfZ - 0.35);
+    propPoint.set(
+      (Math.random() * 2 - 1) * halfX,
+      0,
+      floor.surface.boundCenterZ + (Math.random() * 2 - 1) * halfZ,
+    );
+    node.localToWorld(propPoint);
+
+    prop.node.position.copy(propPoint).addScaledVector(propNormal, prop.rest);
+    prop.node.quaternion.copy(propQuat);
+    prop.node.rotateY(Math.random() * Math.PI * 2);
+    prop.node.visible = true;
+    prop.previous.copy(prop.node.position);
+    log(
+      `${prop.label}: ${prop.node.position.x.toFixed(2)}, ` +
+        `${prop.node.position.z.toFixed(2)}`,
+    );
+  }
+  propsPlaced = true;
+}
+
+/** 선분 from→to 위에서 point까지의 가장 가까운 거리(m). */
+function distanceToSegment(
+  point: THREE.Vector3,
+  from: THREE.Vector3,
+  to: THREE.Vector3,
+): number {
+  segDelta.subVectors(to, from);
+  const lengthSq = segDelta.lengthSq();
+  segToPoint.subVectors(point, from);
+  const t =
+    lengthSq < 1e-9
+      ? 0
+      : THREE.MathUtils.clamp(segToPoint.dot(segDelta) / lengthSq, 0, 1);
+  return segToPoint.addScaledVector(segDelta, -t).length();
+}
+
+/**
+ * 물건이 이번 프레임에 지나간 자리의 바퀴를 짜부러뜨린다.
+ *
+ * 점이 아니라 선분으로 본다. 던진 슬리퍼는 한 프레임에 6cm를 가는데, 바퀴가
+ * 4cm다 — 점으로 재면 정통으로 맞히고도 그냥 지나간다.
+ */
+function crushWith(prop: Prop, from: THREE.Vector3, to: THREE.Vector3): void {
+  for (const unit of units) {
+    if (unit.roach.isSquashed()) continue;
+    // 손안에 있거나 날아가는 중인 놈은 땅에 있는 게 아니다.
+    if (unit.heldBy !== null || unit.flying) continue;
+
+    unit.roach.root.getWorldPosition(roachWorld);
+    if (distanceToSegment(roachWorld, from, to) > prop.radius) continue;
+
+    unit.roach.squash();
+    squashed += 1;
+    lastSmash = prop.label;
+  }
+}
+
+/** 손에서 놓는다. 물건은 버둥대지 않으니 구르기만 준다. */
+function throwProp(prop: Prop, velocity: THREE.Vector3): void {
+  prop.heldBy = null;
+  prop.flying = true;
+  prop.sliding = false;
+  prop.flight.copy(velocity);
+  if (prop.flight.length() > THROW_SPEED_MAX) prop.flight.setLength(THROW_SPEED_MAX);
+  prop.spin.set(
+    (Math.random() - 0.5) * 14,
+    (Math.random() - 0.5) * 8,
+    (Math.random() - 0.5) * 14,
+  );
+  prop.previous.copy(prop.node.position);
+  log(`${prop.label}을 던졌다 (${prop.flight.length().toFixed(1)}m/s)`);
+}
+
+/** 날아가는 물건을 한 프레임 옮긴다. */
+function updateProps(dt: number): void {
+  for (const prop of props) {
+    if (!prop.node.visible || prop.heldBy !== null || !prop.flying) continue;
+
+    propFrom.copy(prop.node.position);
+
+    // ── 바닥을 미끄러지는 중 ──
+    //
+    // 닿은 자리에 그냥 세우면, 조금 짧게 던진 것이 전부 빗나간다. 그리고
+    // 던진 슬리퍼는 원래 미끄러진다 — 그 미끄러지는 구간이 바퀴를 쓸고
+    // 지나가는 게 던지는 쪽의 그림이다.
+    if (prop.sliding) {
+      prop.flight.y = 0;
+      prop.flight.multiplyScalar(Math.max(0, 1 - PROP_FRICTION * dt));
+      propTo.copy(propFrom).addScaledVector(prop.flight, dt);
+      crushWith(prop, propFrom, propTo);
+
+      // 아직 뭔가의 위인가. 짧은 선분을 위아래로 던져 확인한다 — 책상 끝을
+      // 넘어갔으면 아무것도 안 잡히고, 그때는 다시 떨어지면 된다.
+      slideAbove.copy(propTo).setY(propTo.y + 0.03);
+      slideBelow.copy(propTo).setY(propTo.y - 0.03);
+      const still = findLanding(slideAbove, slideBelow, landPoint);
+      if (still === null) {
+        prop.sliding = false; // 계속 flying이다. 다음 프레임부터 떨어진다.
+        prop.node.position.copy(propTo);
+      } else {
+        still.node.updateMatrixWorld();
+        propPoint.copy(landPoint);
+        still.node.localToWorld(propPoint);
+        still.node.getWorldQuaternion(propQuat);
+        propNormal.set(0, 1, 0).applyQuaternion(propQuat);
+        prop.node.position.copy(propPoint).addScaledVector(propNormal, prop.rest);
+        if (prop.flight.length() < PROP_STOP) {
+          prop.sliding = false;
+          prop.flying = false;
+          prop.flight.set(0, 0, 0);
+        }
+      }
+      prop.previous.copy(prop.node.position);
+      continue;
+    }
+
+    prop.flight.y -= FALL_GRAVITY * dt;
+    prop.flight.multiplyScalar(Math.max(0, 1 - PROP_DRAG * dt));
+    propTo.copy(propFrom).addScaledVector(prop.flight, dt);
+
+    crushWith(prop, propFrom, propTo);
+
+    const landed = findLanding(propFrom, propTo, landPoint);
+    if (landed === null) {
+      prop.node.position.copy(propTo);
+      prop.node.rotateX(prop.spin.x * dt);
+      prop.node.rotateY(prop.spin.y * dt);
+      prop.node.rotateZ(prop.spin.z * dt);
+      prop.previous.copy(prop.node.position);
+      continue;
+    }
+
+    landed.node.updateMatrixWorld();
+    propPoint.copy(landPoint);
+    landed.node.localToWorld(propPoint);
+    landed.node.getWorldQuaternion(propQuat);
+    propNormal.set(0, 1, 0).applyQuaternion(propQuat);
+    prop.node.position.copy(propPoint).addScaledVector(propNormal, prop.rest);
+
+    if (propNormal.y > 0.5) {
+      // 수평면이다. 눕고, 가던 쪽으로 미끄러진다.
+      prop.node.quaternion.copy(propQuat);
+      // 가던 방향으로 눕힌다. 던진 물건이 엉뚱한 각도로 서면 눈에 띈다.
+      prop.node.rotateY(Math.atan2(prop.flight.x, prop.flight.z));
+      prop.flight.y = 0;
+      prop.flight.multiplyScalar(PROP_SLIDE_KEEP);
+      if (prop.flight.length() < PROP_STOP) {
+        prop.flying = false;
+        prop.flight.set(0, 0, 0);
+      } else {
+        prop.sliding = true;
+      }
+    } else {
+      // 벽과 천장은 받아 주지 않는다. 바퀴는 거기 붙어 살지만 슬리퍼는
+      // 아니다 — 튕겨 나와 마저 떨어진다.
+      prop.flight.reflect(propNormal).multiplyScalar(PROP_BOUNCE);
+    }
+    prop.previous.copy(prop.node.position);
   }
 }
 
@@ -2482,6 +2739,8 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
     // 두드린다 — 찾으면 pipe.host가 차고, 그 뒤로는 바로 빠져나온다.
 
     aimHostsDown();
+    // 바닥이 들어왔으면 던질 것들을 깔아 둔다.
+    placeProps();
   }
 
   // 구멍을 뚫는다. 감지된 면이 하나라도 들어와 있어야 하므로 껍데기 갱신
@@ -2690,6 +2949,8 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
       unit.surface = next;
     }
   }
+
+  updateProps(dt);
 
   // 포털 평면을 바퀴 쪽에 알려 주고, 두 복사본의 자세를 맞춘다.
   if (placedCount > 0) {
@@ -2959,6 +3220,23 @@ Object.assign(window, {
       높이: +unit.roach.root.position.y.toFixed(3),
       면: SURFACE_NAMES.get(unit.surface) ?? '?',
     })),
+  // 바닥의 물건들. 어디 있고 누가 쥐고 있는지.
+  things: () =>
+    props.map((prop, i) => ({
+      번호: i,
+      이름: prop.label,
+      쥠: prop.heldBy !== null,
+      비행: prop.flying ? +prop.flight.length().toFixed(2) : 0,
+      자리: prop.node.position.toArray().map((c) => +c.toFixed(2)),
+    })),
+  // 가짜 손을 물건 위에 둔다. 다음 프레임에 집힌다.
+  hold: (which = 0) => {
+    const prop = props[which];
+    if (prop === undefined) return '그런 물건 없음';
+    fakePinchAt.copy(prop.node.position);
+    setFakePinch(fakePinchAt, 0.02);
+    return prop.label;
+  },
   // 바퀴가 지금 월드 어디인지. 면 로컬만으로는 카메라를 데려갈 수가 없다.
   at: (which = 0) =>
     units[which]?.roach.root.getWorldPosition(new THREE.Vector3()).toArray().map((c) => +c.toFixed(3)),

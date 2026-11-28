@@ -19,6 +19,7 @@ import {
   fakeHands,
   setFakeFingertip,
   setFakeHand,
+  setFakePinch,
   updateFakeHands,
 } from './fake-hands';
 import { blinkFakeRoom, fakeRoomFrame, fakeRoomSpace } from './fake-room';
@@ -1111,6 +1112,9 @@ function resetRoaches(): void {
   units.forEach((unit, i) => {
     const pipe = pipes[i % pipes.length];
     // 시체가 자국을 끌고 관으로 빨려 들어가지 않게, 판을 새로 깐다.
+    // 쥐고 있던 놈도 손에서 놓인다.
+    unit.heldBy = null;
+    unit.fallSpeed = 0;
     unit.roach.revive();
     unit.pipe = pipe;
     unit.surface = pipe.corridor;
@@ -1864,6 +1868,10 @@ interface RoachUnit {
    * 복사본에게도 알려 줘야 한다 — 안 알려 주면 그 바퀴가 통째로 사라진다.
    */
   pipe: Pipe;
+  /** 지금 이 바퀴를 집고 있는 손. 아니면 null. */
+  heldBy: TrackedHand | null;
+  /** 놓인 뒤 떨어지는 속도(m/s). 0보다 크면 떨어지는 중이다. */
+  fallSpeed: number;
 }
 
 /** 몇 마리나 둘지. 드로우콜을 재 보려고 올려 둔 값이기도 하다. */
@@ -1898,7 +1906,7 @@ for (let i = 0; i < ROACH_COUNT; i += 1) {
   // 따라가는 '안쪽 복사본'이 옆에 생긴다.
   const crossing = makePipeCrossing(roach.root);
   crossing.setPipe(pipe.index);
-  units.push({ roach, crossing, surface: pipe.corridor, pipe });
+  units.push({ roach, crossing, surface: pipe.corridor, pipe, heldBy: null, fallSpeed: 0 });
 
   // 두 벌 모두 배칭에 넘긴다. 안쪽은 재질이 달라 따로 묶인다.
   roachBatch.register(roach.root);
@@ -1958,6 +1966,12 @@ const debugPanel = makeDebugPanel([
       showHandDots = !showHandDots;
       handTracker.debug.visible = showHandDots;
     },
+  },
+  {
+    // 구멍을 전부 다른 자리로 다시 뚫는다. 자리가 난수라, 헤드셋에서 여러
+    // 경우를 보려면 세션을 다시 시작하는 수밖에 없었다.
+    label: '다시',
+    press: repickPipes,
   },
 ]);
 scene.add(debugPanel.group);
@@ -2044,6 +2058,9 @@ function applyTouches(hands: TrackedHand[]): void {
 
     for (const tip of hand.tips) {
       for (const unit of units) {
+        // 쥐고 있는 놈은 이미 손안이다. 놀랄 것도 없고, 집은 손가락이
+        // 매 프레임 자기가 쥔 벌레를 놀래키는 것도 말이 안 된다.
+        if (unit.heldBy !== null || unit.fallSpeed > 0) continue;
         tipLocal.copy(tip);
         unit.surface.node.worldToLocal(tipLocal);
 
@@ -2084,6 +2101,7 @@ function applySmashes(hands: TrackedHand[]): void {
     for (const point of [hand.palm]) {
       for (const unit of units) {
         if (unit.roach.isSquashed()) continue;
+        if (unit.heldBy !== null || unit.fallSpeed > 0) continue;
 
         const node = unit.surface.node;
         palmLocal.copy(point);
@@ -2123,6 +2141,143 @@ function applySmashes(hands: TrackedHand[]): void {
         lastSmash = `${hand.peakSpeed.toFixed(1)}m/s · ${(-facing).toFixed(2)}`;
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 집어 올리기
+//
+// 때리는 것과 집는 것은 같은 벌레에 대한 다른 반응이다. 때리는 쪽은 끝내는
+// 것이고, 집는 쪽은 손에 쥔 채로 계속되는 것이다 — 그래서 이쪽이 훨씬
+// 오래 간다. 쥔 손 안에서 멈추지 않는다는 게 이 작품이 노리는 자리다.
+//
+// 엄지와 검지가 붙으면 집는다. 핀치는 WebXR이 'select'로도 주지만 그건 쓰지
+// 않는다 — 어느 손가락이 얼마나 붙었는지를 알아야 '쥐었다/놓았다'가 되고,
+// select는 그 순간만 알려 준다. 손가락 끝은 이미 읽고 있으니 직접 잰다.
+// ---------------------------------------------------------------------------
+
+/** 엄지와 검지 끝이 이보다 가까우면 집은 것으로 친다(m). */
+const PINCH_CLOSE = 0.035;
+/**
+ * 이보다 벌어지면 놓는다(m). 집는 거리보다 넓다.
+ *
+ * 하나로 두면 손이 그 언저리에서 떨릴 때 쥐었다 놓았다를 반복한다.
+ */
+const PINCH_OPEN = 0.06;
+/** 집는 자리에서 이 거리 안의 바퀴를 집는다(m). */
+const GRAB_RADIUS = 0.055;
+/** 손가락 끝에서 이만큼 아래에 매달린다(m). 등을 집었으니 몸은 조금 밑이다. */
+const HANG_DROP = 0.008;
+/**
+ * 놓았을 때의 낙하 가속도(m/s²).
+ *
+ * 진짜 중력보다 느리다. 4cm짜리가 9.8로 떨어지면 두 프레임 만에 바닥이라
+ * 떨어지는 것이 아니라 사라졌다 나타나는 것으로 보인다.
+ */
+const FALL_GRAVITY = 6;
+
+const pinchPoint = new THREE.Vector3();
+const grabLocal = new THREE.Vector3();
+const roachWorld = new THREE.Vector3();
+/** [미리보기 전용] 가짜 손이 지금 집고 있는 자리. 창구들이 나눠 쓴다. */
+const fakePinchAt = new THREE.Vector3();
+
+/** 떨어뜨린 바퀴가 착지할 면. 감지된 바닥이 있으면 그것, 없으면 손으로 세운 것. */
+function landingSurface(): WalkSurface {
+  return roomShell.surfaces.find((shell) => shell.label === 'floor')?.surface ?? roomFloor;
+}
+
+/**
+ * 집힌 바퀴를 손끝에 둔다.
+ *
+ * 면 로컬로 옮겨 놓는다. 그러면 자리를 다루는 나머지 코드가 그대로 돈다 —
+ * 바퀴를 씬에 직접 매달면 '지금 어느 면 위인가'가 통째로 무너진다.
+ */
+function carryRoach(unit: RoachUnit, point: THREE.Vector3): void {
+  const node = unit.surface.node;
+  node.updateMatrixWorld();
+  grabLocal.copy(point);
+  node.worldToLocal(grabLocal);
+  unit.roach.root.position.copy(grabLocal);
+  unit.roach.root.position.y -= HANG_DROP;
+}
+
+function dropRoach(unit: RoachUnit): void {
+  if (unit.heldBy === null) return;
+  unit.heldBy = null;
+  // 바로 땅에 붙이지 않는다. 놓은 높이에서 떨어진다. 0보다 커야 '떨어지는
+  // 중'으로 읽히므로 아주 작은 값에서 시작한다.
+  unit.fallSpeed = 0.001;
+  log(`${units.indexOf(unit)}번을 놓았다`);
+}
+
+/**
+ * 엄지와 검지로 바퀴를 집는다. 매 프레임 부른다.
+ *
+ * 집는 순간 바닥 면으로 옮겨 놓는다. 벽에서 떼어낸 놈을 벽 면에 둔 채로
+ * 두면, 놓았을 때 '아래'가 벽 쪽이라 바퀴가 옆으로 날아가 벽에 처박힌다 —
+ * 면의 로컬 y가 그 면의 법선이기 때문이다. 바닥 면에서는 로컬 y가 월드 위라
+ * 떨어지는 방향이 저절로 맞는다.
+ */
+/** 지금 두 손의 엄지-검지 간격(cm). 손바닥 패널에서 기준을 맞추려고 띄운다. */
+function pinchGapText(hands: TrackedHand[]): string {
+  const parts = hands
+    .filter((hand) => hand.tracked)
+    .map((hand) => (hand.tips[0].distanceTo(hand.tips[1]) * 100).toFixed(1));
+  return parts.length === 0 ? '손 없음' : parts.join('/') + 'cm';
+}
+
+function applyGrabs(hands: TrackedHand[]): void {
+  for (const hand of hands) {
+    const held = units.find((unit) => unit.heldBy === hand);
+
+    // 손이 시야에서 사라지면 놓은 것이다. 쥔 채로 얼어붙어 있으면 안 된다.
+    if (!hand.tracked) {
+      if (held !== undefined) dropRoach(held);
+      continue;
+    }
+
+    // tips의 0이 엄지, 1이 검지다(hands.ts의 FINGER_TIPS 순서).
+    const gap = hand.tips[0].distanceTo(hand.tips[1]);
+    pinchPoint.addVectors(hand.tips[0], hand.tips[1]).multiplyScalar(0.5);
+
+    if (held !== undefined) {
+      if (gap > PINCH_OPEN) dropRoach(held);
+      else carryRoach(held, pinchPoint);
+      continue;
+    }
+
+    if (gap > PINCH_CLOSE) continue;
+
+    // 집는 자리에서 가장 가까운 한 마리. 둘을 한꺼번에 집지는 않는다.
+    let caught: RoachUnit | undefined;
+    let shortest = GRAB_RADIUS;
+    for (const unit of units) {
+      if (unit.heldBy !== null || unit.fallSpeed > 0) continue;
+      if (unit.roach.isSquashed()) continue;
+      unit.roach.root.getWorldPosition(roachWorld);
+      const distance = roachWorld.distanceTo(pinchPoint);
+      if (distance >= shortest) continue;
+      shortest = distance;
+      caught = unit;
+    }
+    if (caught === undefined) continue;
+
+    const floor = landingSurface();
+    if (caught.surface !== floor) {
+      floor.node.updateMatrixWorld();
+      grabLocal.copy(pinchPoint);
+      floor.node.worldToLocal(grabLocal);
+      caught.roach.placeOn(floor.node, grabLocal.x, grabLocal.z, caught.roach.getHeading());
+      caught.surface = floor;
+      applySurface(caught);
+    }
+
+    caught.heldBy = hand;
+    caught.fallSpeed = 0;
+    caught.roach.hold();
+    carryRoach(caught, pinchPoint);
+    log(`${units.indexOf(caught)}번을 집었다`);
   }
 }
 
@@ -2256,6 +2411,8 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
     hands = fakeHands;
   }
 
+  // 집기가 먼저다. 쥐고 있는 놈은 건드리기도 때리기도 건너뛰어야 한다.
+  applyGrabs(hands);
   applyTouches(hands);
   applySmashes(hands);
 
@@ -2277,7 +2434,10 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
           `${fps.toFixed(0)} fps · 드로우콜 ${cost.calls} · 삼각형 ${cost.triangles}`,
           `평면 ${planeMeshes.size} · 껍데기 ${roomShell.surfaces.length}면` +
             ` · 모서리 ${roomShell.edgeCount}`,
-          `짜부 ${squashed}마리${lastSmash === '' ? '' : ` (마지막 ${lastSmash})`}`,
+          `짜부 ${squashed}마리${lastSmash === '' ? '' : ` (마지막 ${lastSmash})`}` +
+            // 집는 기준(3.5cm)은 기기에서 재 본 값이 아니다. 지금 손가락이
+            // 얼마나 벌어져 있는지를 띄워 두면, 헤드셋에서 보고 맞출 수 있다.
+            ` · 집기 ${pinchGapText(hands)}`,
           // 파이프가 어디에 뚫렸는지. 자리를 코드가 고르게 된 뒤로는, 헤드셋에서
           // 뭔가 이상할 때 제일 먼저 알아야 하는 값이 이것이다.
           `파이프 ${placedCount === 0 ? '아직' : pipes.filter((p) => p.placed).map((p) => p.hostLabel).join(' · ')}` +
@@ -2303,6 +2463,9 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
       const a = units[i];
       const b = units[j];
       if (a.surface !== b.surface) continue;
+      // 손안에 있거나 떨어지는 중인 놈은 땅 위의 짝이 아니다.
+      if (a.heldBy !== null || b.heldBy !== null) continue;
+      if (a.fallSpeed > 0 || b.fallSpeed > 0) continue;
       // 관처럼 좁은 데서는 비키지 않는다. 이유는 AVOID_MIN_HALF_X 주석에.
       if (a.surface.boundHalfX < AVOID_MIN_HALF_X) continue;
       if (a.roach.isSquashed() || b.roach.isSquashed()) continue;
@@ -2317,6 +2480,27 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
   }
 
   for (const unit of units) {
+    // ── 손안에 있거나 떨어지는 중 ──
+    //
+    // 자세만 돌린다. 걷지도, 모서리를 넘지도, 경계에 걸리지도 않는다.
+    // 자리는 집은 손(또는 낙하)이 정한다.
+    if (unit.heldBy !== null) {
+      unit.roach.update(dt, 1, null);
+      continue;
+    }
+    if (unit.fallSpeed > 0) {
+      unit.roach.update(dt, 1, null);
+      unit.fallSpeed += FALL_GRAVITY * dt;
+      unit.roach.root.position.y -= unit.fallSpeed * dt;
+      if (unit.roach.root.position.y <= 0) {
+        unit.roach.root.position.y = 0;
+        unit.fallSpeed = 0;
+        unit.roach.land();
+        applySurface(unit);
+      }
+      continue;
+    }
+
     // 시점 위치는 마리마다 올라서 있는 면이 달라서 각자 변환해야 한다.
     viewerLocal.copy(viewerPosition);
     unit.surface.node.worldToLocal(viewerLocal);
@@ -2605,6 +2789,35 @@ Object.assign(window, {
     return units.map((u) => u.roach.isSquashed());
   },
   squashed: () => units.map((u) => u.roach.isSquashed()),
+  // 가짜 손으로 집어 본다. 손가락 간격을 좁혀 두면 다음 프레임에 집힌다.
+  grab: (which = 0) => {
+    const unit = units[which];
+    if (unit === undefined) return '그런 바퀴 없음';
+    unit.roach.root.getWorldPosition(roachWorld);
+    fakePinchAt.copy(roachWorld);
+    setFakePinch(fakePinchAt, 0.02);
+    return roachWorld.toArray().map((c) => +c.toFixed(3));
+  },
+  // 쥔 손을 옮긴다. 월드 좌표다.
+  carry: (x: number, y: number, z: number) => {
+    fakePinchAt.set(x, y, z);
+    setFakePinch(fakePinchAt, 0.02);
+    return [x, y, z];
+  },
+  // 손가락을 벌린다. 쥐고 있던 놈이 떨어진다.
+  letgo: () => {
+    setFakePinch(fakePinchAt, 0.09);
+    return '놓았다';
+  },
+  // 누가 손에 있고 누가 떨어지는 중인지.
+  hands: () =>
+    units.map((unit, i) => ({
+      번호: i,
+      쥠: unit.heldBy !== null,
+      낙하: +unit.fallSpeed.toFixed(2),
+      높이: +unit.roach.root.position.y.toFixed(3),
+      면: SURFACE_NAMES.get(unit.surface) ?? '?',
+    })),
   // 바퀴가 지금 월드 어디인지. 면 로컬만으로는 카메라를 데려갈 수가 없다.
   at: (which = 0) =>
     units[which]?.roach.root.getWorldPosition(new THREE.Vector3()).toArray().map((c) => +c.toFixed(3)),
@@ -2734,10 +2947,9 @@ async function startSession(): Promise<void> {
 
   enterButton.textContent = 'AR 종료';
 
-  // 'select'는 컨트롤러 트리거와 핸드 핀치를 모두 포함한다. 세션에 직접 붙이면
-  // 어느 손/컨트롤러인지 신경 쓸 필요가 없다. three.js의 renderer.xr.getController(i)
-  // 로도 같은 이벤트를 받을 수 있지만, 그건 컨트롤러를 씬에 그릴 때 쓰는 것이다.
-  session.addEventListener('select', repickPipes);
+  // 핀치에 'select'를 걸어 두지 않는다. 핀치는 이제 바퀴를 집는 손짓이고,
+  // 집을 때마다 구멍이 전부 다시 뚫리면 쓸 수가 없다. 다시 뚫는 길은 손바닥
+  // 패널의 '다시' 버튼으로 옮겼다 — 실수로 눌릴 일이 없는 자리다.
 
   // 이 세션의 방에 맞춰 다시 뚫는다.
   resetPipes();

@@ -205,6 +205,13 @@ export interface Roach {
    * 관으로 빨려 들어가면 곤란하다.
    */
   revive(): void;
+
+  /** 손에 잡혔다. 걷기를 멈추고 쉬지 않고 버둥댄다. 자리는 밖에서 정한다. */
+  hold(): void;
+  /** 지금 잡혀 있는지. 떨어지는 동안에도 참이다 — 버둥대는 건 그대로다. */
+  isHeld(): boolean;
+  /** 땅에 닿았다. 놀란 채로 다시 걷기 시작한다. */
+  land(): void;
   /**
    * 이 자리를 피해 간다. 같은 면 위의 다른 바퀴를 넘겨주면 서로 비킨다.
    * 한 프레임짜리 밀침이라 매 프레임 다시 불러야 한다.
@@ -827,7 +834,7 @@ export function makeRoach(): Roach {
   // 돌아다니다가, 위협이 다가오면 '얼어붙고', 그 다음 '튄다'.
   // 얼어붙는 단계가 핵심이다. 바로 도망가게 하면 그냥 빠른 물체로 보이는데,
   // 0.2초쯤 완전히 멎었다가 터지듯 달리면 그제서야 벌레처럼 보인다.
-  type State = 'wander' | 'startle' | 'flee' | 'groom' | 'squashed';
+  type State = 'wander' | 'startle' | 'flee' | 'groom' | 'squashed' | 'held';
   let state: State = 'wander';
   /** 지금 상태가 끝날 때까지 남은 시간. */
   let stateTimer = 0;
@@ -883,6 +890,8 @@ export function makeRoach(): Roach {
   let goreT = 0;
   /** 짜부러진 뒤 흐른 시간(초). 다리 경련이 이걸로 잦아든다. */
   let twitchT = 0;
+  /** 손에 잡힌 뒤 흐른 시간(초). 발버둥이 이걸로 돈다. */
+  let heldT = 0;
 
   const angles: JointAngles = { femurAngle: 0, kneeAngle: 0 };
 
@@ -1184,6 +1193,65 @@ export function makeRoach(): Roach {
   }
 
   /**
+   * 손에 잡힌 자세.
+   *
+   * 걷는 코드를 통째로 건너뛴다. IK도 끈다 — 디딜 땅이 없고, 발이 어디 있어야
+   * 하는지가 더는 질문이 아니다. 대신 온몸이 쉬지 않고 버둥거린다.
+   *
+   * 잡힌 벌레가 무서운 건 모양이 아니라 '멈추지 않는다'는 것이다. 걸을 때의
+   * 다리는 규칙적이라 기계처럼 읽히는데, 여기서는 여섯이 제각기 다른 박자로
+   * 허공을 긁어야 한다. 그래서 다리마다 위상과 주파수를 어긋나게 준다.
+   *
+   * 더듬이는 걷는 쪽 코드를 못 쓴다(그건 아래 update의 뒷부분에 있고, 잡힌
+   * 동안에는 거기까지 가지 않는다). 짧게 다시 적는다 — 더듬이가 멈춘 채
+   * 다리만 버둥대면 죽은 것을 흔드는 그림이 된다.
+   */
+  function poseHeld(dt: number): void {
+    heldT += dt;
+
+    model.scale.setScalar(ROACH_LENGTH);
+
+    // 몸통: 손가락 사이에서 비틀린다. 주기가 다른 셋을 축마다 따로 줘서,
+    // 되풀이되는 자세가 눈에 띄지 않게 한다.
+    body.position.y = 0;
+    body.rotation.set(
+      Math.sin(heldT * 9.3) * 0.22,
+      Math.sin(heldT * 5.1) * 0.26,
+      Math.sin(heldT * 7.7) * 0.3,
+    );
+
+    // 몸 전체는 붙들린 자리를 축으로 느리게 몸부림친다.
+    model.rotation.set(
+      Math.sin(heldT * 3.1) * 0.3,
+      Math.sin(heldT * 2.3) * 0.35,
+      Math.sin(heldT * 2.7) * 0.4,
+    );
+
+    legs.forEach((leg, i) => {
+      const t = heldT * (15 + i * 2.6) + i * 1.9;
+      leg.hip.rotation.y = leg.restYaw + leg.side * (0.45 + Math.sin(t) * 0.5);
+      leg.femur.rotation.z = -0.45 + Math.sin(t * 1.27 + 1) * 0.55;
+      leg.knee.rotation.z = -0.8 + Math.sin(t * 0.91 + 2) * 0.75;
+      leg.tarsus.rotation.z = Math.sin(t * 1.63) * 0.45;
+    });
+
+    for (const antenna of antennae) {
+      antenna.segments.forEach((segment, i) => {
+        const t = heldT * (12 + i * 3.4) + antenna.side * 1.7 + i * 2.1;
+        if (i === 0) {
+          // 걷는 쪽과 같은 약속이다 — 오른쪽은 -각, 왼쪽은 π+각.
+          const spread = 1.0 + Math.sin(t) * 0.6;
+          segment.rotation.y = antenna.side > 0 ? -spread : Math.PI + spread;
+          segment.rotation.z = Math.sin(t * 1.3) * 0.55;
+        } else {
+          segment.rotation.y = Math.sin(t) * 0.5;
+          segment.rotation.z = -0.25 + Math.sin(t * 1.3) * 0.45;
+        }
+      });
+    }
+  }
+
+  /**
    * 짜부러진 자세.
    *
    * IK를 건너뛴다. 발이 어디 있어야 하는지가 더는 의미 없고, 다리는 눌려서
@@ -1248,6 +1316,13 @@ export function makeRoach(): Roach {
 
     if (state === 'squashed') {
       poseSquashed(dt);
+      avoidX = 0;
+      avoidZ = 0;
+      return;
+    }
+
+    if (state === 'held') {
+      poseHeld(dt);
       avoidX = 0;
       avoidZ = 0;
       return;
@@ -1484,13 +1559,35 @@ export function makeRoach(): Roach {
       gore.group.visible = true;
       // 발 자국은 이제 쓰이지 않는다. 다리는 IK 대신 눌린 자세로 굳는다.
     },
+    hold() {
+      if (state === 'squashed' || state === 'held') return;
+      state = 'held';
+      heldT = 0;
+      speed = 0;
+      targetSpeed = 0;
+      turnRate = 0;
+    },
+    isHeld() {
+      return state === 'held';
+    },
+    land() {
+      if (state !== 'held') return;
+      state = 'wander';
+      model.rotation.set(0, 0, 0);
+      body.rotation.set(0, 0, 0);
+      plantAll();
+      // 떨어진 자리에서 가만히 있을 리가 없다. 놀란 채로 시작한다.
+      scare(root.position.x, root.position.z + 0.2);
+    },
     revive() {
-      if (state !== 'squashed') return;
+      if (state !== 'squashed' && state !== 'held') return;
       state = 'wander';
       squashT = 0;
       gore.group.visible = false;
       model.scale.setScalar(ROACH_LENGTH);
+      model.rotation.set(0, 0, 0);
       body.position.y = 0;
+      body.rotation.set(0, 0, 0);
       plantAll();
     },
     isSquashed() {

@@ -105,6 +105,33 @@ export function setFakeFingertip(x: number, y: number, z: number): void {
   fakeHands[1].tips[1].set(x, y, z);
 }
 
+/**
+ * 오른손의 엄지와 검지 끝을 집는 자세로 둔다.
+ *
+ * 집기 판정은 이 두 점의 '간격'으로 갈리는데, setFakeHand는 손가락 다섯을
+ * 한 점에 모아 둔다 — 그걸로는 영영 집고 있는 손이 된다. 간격을 직접 주는
+ * 창구가 따로 있어야 '벌린 손'을 흉내 낼 수 있다.
+ *
+ * @param gap 엄지-검지 간격(m). 좁으면 집은 것, 넓으면 편 것.
+ */
+export function setFakePinch(point: THREE.Vector3, gap: number): void {
+  const hand = fakeHands[1];
+  hand.tracked = true;
+  hand.tips[0].copy(point).addScaledVector(PINCH_AXIS, gap / 2);
+  hand.tips[1].copy(point).addScaledVector(PINCH_AXIS, -gap / 2);
+  // 나머지 손가락은 치워 둔다. 두면 건드리기 판정에 걸려서, 집으려고
+  // 다가가는 것만으로 바퀴가 달아난다.
+  for (let i = 2; i < hand.tips.length; i += 1) hand.tips[i].copy(AWAY);
+  // 손바닥은 손가락 뒤에 둔다. 때리기는 손바닥으로만 판정하므로, 집는 동안
+  // 때린 것이 되지 않게 멀찍이 두고 속도도 0으로 둔다.
+  hand.palm.copy(point).addScaledVector(PINCH_AXIS, 0.08);
+  hand.palmVelocity.set(0, 0, 0);
+  hand.peakSpeed = 0;
+}
+
+/** 집는 두 손가락이 벌어지는 축. 아무 방향이어도 되고, 간격만 뜻이 있다. */
+const PINCH_AXIS = new THREE.Vector3(1, 0, 0);
+
 /** 오른손을 치운다. 때려 본 뒤 계속 거기 있으면 매 프레임 때리게 된다. */
 export function clearFakeHand(): void {
   setFakeHand('right', AWAY, AWAY, UP_AXIS, ZERO, 0);

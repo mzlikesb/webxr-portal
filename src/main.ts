@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { makeRoach } from './roach';
+import { makeRoach, ROACH_LENGTH } from './roach';
 import type { Roach } from './roach';
 import {
   disablePortalPlane,
@@ -869,6 +869,44 @@ roomFloor.hugEdges = true;
  * 파이프 안에서 꿈틀대며 밀리는 게 그림으로도 맞다.
  */
 const CORRIDOR_HALF_X = PIPE_BORE * 0.3;
+
+/** 바퀴 몸의 반폭(m). 다리를 벌린 폭이라 그림자 판(몸길이의 0.7배)에서 딴다. */
+const ROACH_HALF_WIDTH = ROACH_LENGTH * 0.4;
+
+/**
+ * 딛는 면을 관 '축'보다 이만큼 아래에 둔다(m). 구경의 절반이 아니다.
+ *
+ * 전에는 구경의 절반, 즉 관의 맨 밑에 접하는 평면이었다. 둥근 관에 평평한
+ * 바닥을 넣는 방법으로는 최악의 짝이다 — 접점은 딱 한 줄(x = 0)뿐이고, 거기서
+ * 조금만 옆으로 가면 평면이 관 밖으로 나간다. 축에서 4.2cm 지점에서 벌써
+ * 1.4cm를 뚫고 나가는데, 바퀴 키가 1cm도 안 되니 몸이 통째로 관 벽에 묻힌다.
+ *
+ * 실제로 그랬다. 헤드셋에서 '파이프와 벽 사이 전환부에서 묻힌다'고 보였고,
+ * 재 보니 복도에 있는 여덟 마리가 **전부** 관 밖에 있었다 — 가운데 선 놈도
+ * 배가 관 벽과 같은 평면이었다(0.03cm 밖). 아래턱 선 자체가 구멍 테두리 위에
+ * 놓여 있었으니, 거기를 걷는 바퀴는 스텐실에도 반쯤 잘렸다.
+ *
+ * 평평한 바닥이 관 안에 들어가려면 접선이 아니라 '현'이어야 한다. 바퀴가 쓸
+ * 반폭에 몸 반폭을 더한 지점이 관 벽에 닿도록 깊이를 잡는다 — 피타고라스
+ * 한 줄이고, 구경이나 복도 폭을 바꿔도 따라온다.
+ */
+const CORRIDOR_DROP = Math.sqrt(
+  (PIPE_BORE / 2) ** 2 - (CORRIDOR_HALF_X + ROACH_HALF_WIDTH) ** 2,
+);
+
+/**
+ * 면의 반폭이 이보다 좁으면 서로 비키지 않는다(m).
+ *
+ * 비키기는 몸길이의 1.6배 안에 든 이웃의 반대쪽으로 트는 조향이다. 복도는
+ * 반폭이 4.2cm라 그 반경보다 좁다 — 여덟 마리가 들어가면 모두가 서로의
+ * 반경 안이라, 전부가 쉬지 않고 바깥쪽으로 튼다. 가장자리 조향도 조향일
+ * 뿐이라 이걸 못 이기고, 축에서 16cm까지 밀려 나간 놈이 있었다. 관 반지름의
+ * 두 배다.
+ *
+ * 좁은 데서는 비키는 대신 겹친다. 파이프 안에서 몸이 서로 밀리고 포개지는
+ * 건 피할 일이 아니라 그리려던 그림이다.
+ */
+const AVOID_MIN_HALF_X = ROACH_LENGTH * 1.5;
 corridorFloor.boundHalfX = CORRIDOR_HALF_X;
 corridorFloor.boundCenterZ = -0.12;
 corridorFloor.boundHalfZ = 0.2;
@@ -1257,9 +1295,11 @@ function layOutSurfaces(): void {
 
   // 아래턱: 구멍의 '바닥' 선. 두 면이 여기서 만난다.
   // 면과 겹쳐 z-fighting이 나지 않게 법선 쪽으로 1mm 띄운다.
+  // 아래턱은 구멍의 맨 밑이 아니라 관 안쪽으로 조금 올라온 '현' 위에 있다.
+  // 이유는 CORRIDOR_DROP 주석에.
   const sill = new THREE.Vector3()
     .copy(portal.position)
-    .addScaledVector(portalUp, -PIPE_BORE / 2)
+    .addScaledVector(portalUp, -CORRIDOR_DROP)
     .addScaledVector(portalNormal, 0.001);
 
   // 관 안에서 딛는 면: 등은 아래턱 반대쪽(portalUp)을 보고, +Z가 구멍 밖이다.
@@ -2050,6 +2090,8 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
       const a = units[i];
       const b = units[j];
       if (a.surface !== b.surface) continue;
+      // 관처럼 좁은 데서는 비키지 않는다. 이유는 AVOID_MIN_HALF_X 주석에.
+      if (a.surface.boundHalfX < AVOID_MIN_HALF_X) continue;
       if (a.roach.isSquashed() || b.roach.isSquashed()) continue;
 
       const dx = a.roach.root.position.x - b.roach.root.position.x;
@@ -2067,6 +2109,24 @@ function stepFrame(time: DOMHighResTimeStamp, frame?: XRFrame): void {
     unit.surface.node.worldToLocal(viewerLocal);
 
     unit.roach.update(dt, 1, viewerLocal);
+
+    // ── 관 벽은 진짜 벽이다 ──
+    //
+    // 다른 면의 경계는 '되도록 넘지 않는' 성향이다. 가장자리를 따라가되 가끔
+    // 넘어서 보는 그 성향이 주촉성의 핵심이고, 면과 면 사이를 넘어가는 길이기도
+    // 하다. 그래서 경계는 조향일 뿐 울타리가 아니다.
+    //
+    // 복도에서만은 그게 통하지 않는다. 반폭이 4.2cm인데 바퀴 걸음이 0.2m/s다 —
+    // 흩어 놓을 때 받은 방향이 옆쪽이면 조향이 돌려세우기 전에 이미 나가 있고,
+    // 한 번 나가면 바깥에서 벽과 나란히 계속 걷는다. 축에서 20cm까지 나간 놈이
+    // 있었다. 관 반지름의 세 배다.
+    //
+    // 옆으로는 넘을 곳이 없다 — 넘으면 관 밖, 즉 벽 속이다. 못 넘게 한다.
+    if (unit.surface === corridorFloor) {
+      const x = unit.roach.root.position.x;
+      if (x > CORRIDOR_HALF_X) unit.roach.root.position.x = CORRIDOR_HALF_X;
+      else if (x < -CORRIDOR_HALF_X) unit.roach.root.position.x = -CORRIDOR_HALF_X;
+    }
 
     // 짜부러진 놈은 그 자리에 그대로 둔다.
     if (unit.roach.isSquashed()) continue;

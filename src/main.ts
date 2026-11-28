@@ -1106,8 +1106,12 @@ function beginLurking(pipe: Pipe): void {
 function resetRoaches(): void {
   for (const pipe of pipes) beginLurking(pipe);
 
+  squashed = 0;
+
   units.forEach((unit, i) => {
     const pipe = pipes[i % pipes.length];
+    // 시체가 자국을 끌고 관으로 빨려 들어가지 않게, 판을 새로 깐다.
+    unit.roach.revive();
     unit.pipe = pipe;
     unit.surface = pipe.corridor;
     unit.crossing.setPipe(pipe.index);
@@ -2601,6 +2605,20 @@ Object.assign(window, {
     return units.map((u) => u.roach.isSquashed());
   },
   squashed: () => units.map((u) => u.roach.isSquashed()),
+  // 바퀴가 지금 월드 어디인지. 면 로컬만으로는 카메라를 데려갈 수가 없다.
+  at: (which = 0) =>
+    units[which]?.roach.root.getWorldPosition(new THREE.Vector3()).toArray().map((c) => +c.toFixed(3)),
+  // 손 없이 짜부러뜨리는 창구. 때리기 판정(손바닥 각도·속도)을 통과시키지
+  // 않고도 터진 뒤의 그림을 볼 수 있어야 한다.
+  splat: (which?: number) => {
+    const picked = which === undefined ? units : [units[which]];
+    for (const unit of picked) {
+      if (unit === undefined || unit.roach.isSquashed()) continue;
+      unit.roach.squash();
+      squashed += 1;
+    }
+    return `${squashed}마리`;
+  },
   // 손바닥 패널의 버튼을 눌러 보는 창구. 미리보기에는 진짜 손가락이
   // 없어서, 패널 로컬 좌표(미터)를 받아 가짜 검지를 거기 갖다 댄다.
   poke: (index = 0) => {

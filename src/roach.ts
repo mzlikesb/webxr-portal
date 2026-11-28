@@ -198,6 +198,14 @@ export interface Roach {
   /** 이미 짜부러졌는지. 밖에서 더 건드릴 필요가 없다. */
   isSquashed(): boolean;
   /**
+   * 되살린다. 자국도 같이 지운다.
+   *
+   * 때려서 죽은 것은 되돌아오지 않는다. 이건 판을 새로 까는 길이다 — 구멍을
+   * 다시 뚫으면 바퀴도 관 속으로 되돌아가는데, 그때 시체가 자국을 끌고
+   * 관으로 빨려 들어가면 곤란하다.
+   */
+  revive(): void;
+  /**
    * 이 자리를 피해 간다. 같은 면 위의 다른 바퀴를 넘겨주면 서로 비킨다.
    * 한 프레임짜리 밀침이라 매 프레임 다시 불러야 한다.
    */
@@ -499,6 +507,215 @@ function makeContactShadow(): THREE.Mesh {
 }
 
 // ---------------------------------------------------------------------------
+// 짜부러진 뒤에 남는 것
+//
+// 전에는 몸이 납작해지고 다리가 벌어지는 게 전부였다. 그건 '눌렸다'지
+// '터졌다'가 아니다. 바퀴를 때려 본 사람이 기억하는 건 눌린 모양이 아니라
+// 바닥에 남은 자국이고, 그 자국을 지워야 끝난다는 사실이다.
+//
+// 세 가지를 더한다.
+//   얼룩  바닥에 번지는 젖은 자국. 몸보다 크고, 몸보다 오래 남는다.
+//   내장  몸 밑에서 옆으로 밀려 나온 허연 덩어리. 어두운 몸에 대비되는
+//         유일한 밝은 색이라, 4cm짜리 벌레에서도 이것만은 읽힌다.
+//   알    배에서 쏟아진 알집의 알. 한 마리를 잡은 게 아니라는 뜻이다.
+//
+// 그리고 다리는 한참 떤다. 죽은 것과 죽어 가는 것의 차이가 거기 있다.
+//
+// 지오메트리와 재질은 전부 모두가 나눠 쓴다 — 접촉 그림자와 같은 이유로,
+// 마리마다 복제하면 인스턴싱으로 묶이지 않는다. 같아 보이지 않게 하는 일은
+// 얼룩을 저마다 다른 각도로 깔고, 덩어리 자리를 난수로 집어서 한다.
+// ---------------------------------------------------------------------------
+
+/** 얼룩과 내장이 다 퍼지는 데 걸리는 시간(초). 몸이 눌리는 것보다 느리다. */
+const GORE_SPREAD = 0.5;
+/** 짜부러진 뒤 다리가 떠는 시간(초). */
+const TWITCH_TIME = 2.4;
+
+/** 바닥 자국 무늬를 캔버스에 그린다. 딱 한 번 돈다. */
+function paintSplat(): THREE.Texture {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+
+  const ctx = canvas.getContext('2d');
+  if (ctx !== null) {
+    const mid = size / 2;
+
+    // 가운데 덩어리. 원 하나로 그리면 물방울처럼 동그래서 '흘렀다'가 안 된다.
+    // 타원 여럿을 겹쳐 가장자리를 울퉁불퉁하게 만든다.
+    ctx.fillStyle = 'rgba(26, 11, 7, 0.86)';
+    for (let i = 0; i < 18; i += 1) {
+      const angle = (i / 18) * Math.PI * 2;
+      const reach = mid * (0.1 + Math.random() * 0.17);
+      ctx.beginPath();
+      ctx.ellipse(
+        mid + Math.cos(angle) * reach,
+        mid + Math.sin(angle) * reach,
+        mid * (0.12 + Math.random() * 0.14),
+        mid * (0.1 + Math.random() * 0.14),
+        angle,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
+
+    // 둘레로 번진 묽은 테. 진물이 스며든 자리라 덩어리보다 연하고 넓다.
+    ctx.fillStyle = 'rgba(40, 20, 12, 0.3)';
+    for (let i = 0; i < 12; i += 1) {
+      const angle = Math.random() * Math.PI * 2;
+      const reach = mid * (0.3 + Math.random() * 0.12);
+      ctx.beginPath();
+      ctx.ellipse(
+        mid + Math.cos(angle) * reach,
+        mid + Math.sin(angle) * reach,
+        mid * (0.1 + Math.random() * 0.1),
+        mid * (0.08 + Math.random() * 0.1),
+        angle,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
+
+    // 튄 방울. 때린 자리에서 사방으로 흩어진다. 이게 있어야 '맞았다'가 된다.
+    ctx.fillStyle = 'rgba(22, 9, 6, 0.75)';
+    for (let i = 0; i < 18; i += 1) {
+      const angle = Math.random() * Math.PI * 2;
+      const reach = mid * (0.3 + Math.random() * 0.52);
+      const r = mid * (0.009 + Math.random() * 0.026);
+      ctx.beginPath();
+      // 날아간 방향으로 조금 길쭉하다. 많이 늘이면 햇살처럼 뻗어서,
+      // 튄 자국이 아니라 그려 넣은 무늬로 보인다.
+      ctx.ellipse(
+        mid + Math.cos(angle) * reach,
+        mid + Math.sin(angle) * reach,
+        r,
+        r * (1 + Math.random() * 0.7),
+        angle + Math.PI / 2,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+let goreAssets: {
+  stainGeometry: THREE.BufferGeometry;
+  blobGeometry: THREE.BufferGeometry;
+  stainMaterial: THREE.Material;
+  gutsMaterial: THREE.Material;
+  eggMaterial: THREE.Material;
+} | null = null;
+
+function goreKit(): NonNullable<typeof goreAssets> {
+  if (goreAssets !== null) return goreAssets;
+  goreAssets = {
+    // 얼룩은 몸보다 한참 넓다. 번진 테와 튄 방울까지 무늬 안에 있다.
+    stainGeometry: new THREE.PlaneGeometry(ROACH_LENGTH * 2.3, ROACH_LENGTH * 2.3),
+    // 덩어리는 전부 이 구 하나를 눌러 쓴다.
+    blobGeometry: new THREE.SphereGeometry(1, 8, 6),
+    stainMaterial: new THREE.MeshBasicMaterial({
+      map: paintSplat(),
+      transparent: true,
+      // 얼룩이 깊이를 쓰면 그 위에 놓인 다리가 잘린다. 접촉 그림자와 같다.
+      depthWrite: false,
+    }),
+    // 어두운 몸에서 유일하게 밝은 것. 젖은 것으로 보이게 거칠기를 낮춘다.
+    gutsMaterial: new THREE.MeshStandardMaterial({ color: 0xc9b183, roughness: 0.22 }),
+    eggMaterial: new THREE.MeshStandardMaterial({ color: 0xe6dcc2, roughness: 0.34 }),
+  };
+  return goreAssets;
+}
+
+interface Gore {
+  /** 이 그룹의 visible로 통째로 켜고 끈다 — 메시 하나하나는 배칭이 숨겨 둔다. */
+  group: THREE.Group;
+  stain: THREE.Mesh;
+  /**
+   * 얼룩을 축마다 다르게 늘이는 비율.
+   *
+   * 무늬 한 장을 모두가 나눠 쓰니 그대로 깔면 여덟 마리가 같은 별 모양을
+   * 남긴다. 각도를 돌리는 것만으로는 돌려 놓은 티가 나서, 한쪽으로 늘여
+   * 둔다 — 튄 방향이 있는 것처럼 보인다.
+   */
+  stainAspect: { x: number; z: number };
+  /** 터져 나온 것들. 다 퍼졌을 때의 크기를 각자 들고 있다. */
+  bits: { node: THREE.Object3D; size: THREE.Vector3 }[];
+}
+
+/** 짜부러질 때 드러날 것들을 미리 만들어 숨겨 둔다. */
+function buildGore(): Gore {
+  const kit = goreKit();
+
+  const group = new THREE.Group();
+  group.visible = false;
+
+  // 얼룩 무늬는 한 장을 모두가 나눠 쓴다. 저마다 다른 각도로 깔아서 같은
+  // 자국이 반복되지 않게 한다 — 무늬를 마리마다 그리면 드로우콜이 는다.
+  const spin = new THREE.Group();
+  spin.rotation.y = Math.random() * Math.PI * 2;
+  group.add(spin);
+
+  const stainAspect = { x: 0.85 + Math.random() * 0.55, z: 0.85 + Math.random() * 0.55 };
+
+  const stain = new THREE.Mesh(kit.stainGeometry, kit.stainMaterial);
+  stain.rotation.x = -Math.PI / 2; // 바닥에 눕힌다
+  stain.position.y = 0.0008; // 접촉 그림자(0.0005)보다 위
+  stain.renderOrder = -1; // 몸보다 먼저
+  spin.add(stain);
+
+  const bits: Gore['bits'] = [];
+
+  // 내장: 몸 밑에서 좌우로 밀려 나온 덩어리. 납작하게 눌려 있다.
+  for (let i = 0; i < 7; i += 1) {
+    const blob = new THREE.Mesh(kit.blobGeometry, kit.gutsMaterial);
+    const side = i % 2 === 0 ? 1 : -1;
+    blob.position.set(
+      side * ROACH_LENGTH * (0.16 + Math.random() * 0.24),
+      ROACH_LENGTH * 0.015,
+      ROACH_LENGTH * (-0.45 + Math.random() * 0.6),
+    );
+    blob.rotation.y = Math.random() * Math.PI;
+    // 축마다 비율을 따로 준다. 구를 그대로 눌러 놓으면 만두처럼 보인다 —
+    // 밀려 나온 것은 눌린 쪽으로 퍼지고 아주 납작하다.
+    const r = ROACH_LENGTH * (0.07 + Math.random() * 0.07);
+    group.add(blob);
+    bits.push({
+      node: blob,
+      size: new THREE.Vector3(r * (0.8 + Math.random() * 0.9), r * 0.22, r * (0.9 + Math.random())),
+    });
+  }
+
+  // 알집에서 쏟아진 알. 배 뒤로 줄줄이 흘러나온다.
+  // 한 마리를 잡은 게 아니라는 뜻이고, 이 작품에서 제일 하기 싫은 그림이다.
+  for (let i = 0; i < 4; i += 1) {
+    const egg = new THREE.Mesh(kit.blobGeometry, kit.eggMaterial);
+    // 곧게 늘어놓으면 뿌려 둔 것처럼 보인다. 옆으로도 흩뜨린다.
+    egg.position.set(
+      (Math.random() - 0.5) * ROACH_LENGTH * 0.75,
+      ROACH_LENGTH * 0.035,
+      ROACH_LENGTH * (-0.55 - i * 0.14 - Math.random() * 0.22),
+    );
+    egg.rotation.y = (Math.random() - 0.5) * 1.6;
+    const r = ROACH_LENGTH * 0.042;
+    group.add(egg);
+    bits.push({ node: egg, size: new THREE.Vector3(r * 0.75, r * 0.7, r * 1.7) });
+  }
+
+  // 다 퍼지기 전에는 점만 하다. 0으로 두면 첫 프레임에 행렬이 퇴화한다.
+  for (const bit of bits) bit.node.scale.setScalar(1e-4);
+
+  return { group, stain, bits, stainAspect };
+}
+
+// ---------------------------------------------------------------------------
 
 export function makeRoach(): Roach {
 
@@ -511,6 +728,11 @@ export function makeRoach(): Roach {
   // root는 미터 단위이고 Y 회전만 하므로, 그림자를 여기 붙이면 몸이
   // 앞뒤로 숙이거나 좌우로 기울어도 바닥에 평평하게 붙어 있다.
   root.add(makeContactShadow());
+
+  // 짜부러질 때 드러날 것들. root에 붙인다 — 미터 단위에 Y 회전만 하는
+  // 좌표계라, 몸이 어떻게 눌리든 자국은 바닥에 평평하게 붙어 있다.
+  const gore = buildGore();
+  root.add(gore.group);
 
   // 몸통만 따로 쥐고 있는다. 걸을 때 이 그룹만 흔들 것이다 — 고관절까지 같이
   // 흔들면 발 자국을 몸 공간으로 되돌리는 계산이 어긋난다.
@@ -657,6 +879,10 @@ export function makeRoach(): Roach {
   let avoidZ = 0;
   /** 짜부러지는 진행도. 0에서 1로 간다. */
   let squashT = 0;
+  /** 얼룩과 내장이 퍼진 정도(0~1). */
+  let goreT = 0;
+  /** 짜부러진 뒤 흐른 시간(초). 다리 경련이 이걸로 잦아든다. */
+  let twitchT = 0;
 
   const angles: JointAngles = { femurAngle: 0, kneeAngle: 0 };
 
@@ -983,6 +1209,38 @@ export function makeRoach(): Roach {
       leg.knee.rotation.z = leg.knee.rotation.z * (1 - t) + -0.1 * t;
       leg.tarsus.rotation.z = leg.tarsus.rotation.z * (1 - t);
     }
+
+    // ── 터진 것들 ──
+    //
+    // 몸이 눌리는 것(0.12초)보다 느리게 퍼진다. 같이 가면 한 동작으로 보여서
+    // '눌렸다'로 끝나는데, 자국이 뒤따라 번져야 '터졌다'가 된다.
+    goreT = Math.min(1, goreT + dt / GORE_SPREAD);
+    const g = goreT * (2 - goreT); // 처음에 확 밀려 나오고 천천히 멎는다
+    // PlaneGeometry는 X-Y에 서 있고 X로 눕혀 뒀다. 그래서 로컬 x가 땅의 가로,
+    // 로컬 y가 땅의 세로다 — z를 건드려도 아무 일도 일어나지 않는다.
+    const spread = 0.3 + 0.7 * g;
+    gore.stain.scale.set(gore.stainAspect.x * spread, gore.stainAspect.z * spread, 1);
+    for (const bit of gore.bits) {
+      bit.node.scale.set(bit.size.x * g, bit.size.y * g, bit.size.z * g);
+    }
+
+    // ── 경련 ──
+    //
+    // 눌린 자세로 바로 굳으면 소품이다. 죽은 것과 죽어 가는 것의 차이가 여기
+    // 있고, 보는 사람이 손을 떼고도 한참 쳐다보게 되는 것도 이것 때문이다.
+    //
+    // 사인 하나면 규칙적인 떨림이라 기계처럼 보인다. 주기가 다른 둘을 곱하면
+    // 떨다 멎다 다시 떠는 모양이 나온다.
+    twitchT += dt;
+    const left = 1 - twitchT / TWITCH_TIME;
+    if (left > 0) {
+      const amount = left * left * 0.3;
+      legs.forEach((leg, i) => {
+        const beat = Math.sin(twitchT * (22 + i * 4.3) + i) * Math.sin(twitchT * 6.5 + i * 2.1);
+        leg.knee.rotation.z += beat * amount;
+        leg.hip.rotation.y += beat * amount * 0.45;
+      });
+    }
   }
 
   function update(dt: number, speedScale: number, threat: THREE.Vector3 | null): void {
@@ -1218,7 +1476,22 @@ export function makeRoach(): Roach {
       speed = 0;
       targetSpeed = 0;
       turnRate = 0;
+      squashT = 0;
+      goreT = 0;
+      twitchT = 0;
+      // 터진 것들을 드러낸다. 메시 하나하나는 배칭이 숨겨 두므로, 켜고 끄는
+      // 것은 반드시 이 그룹이어야 한다.
+      gore.group.visible = true;
       // 발 자국은 이제 쓰이지 않는다. 다리는 IK 대신 눌린 자세로 굳는다.
+    },
+    revive() {
+      if (state !== 'squashed') return;
+      state = 'wander';
+      squashT = 0;
+      gore.group.visible = false;
+      model.scale.setScalar(ROACH_LENGTH);
+      body.position.y = 0;
+      plantAll();
     },
     isSquashed() {
       return state === 'squashed';
